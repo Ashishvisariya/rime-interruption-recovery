@@ -1,1 +1,1 @@
-# Placeholder — implementation will be added during the build.
+"""Rime Voice Assistant Backend Package."""

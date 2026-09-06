@@ -1,2 +1,31 @@
+# Environment and Secret files
 .env
 backend/.env
+*.env
+
+# Python Virtual Environments
+venv/
+backend/venv/
+env/
+.venv/
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend Build Outputs
+node_modules/
+dist/
+build/
+.next/
+.cache/
+
+# IDE / OS Artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
