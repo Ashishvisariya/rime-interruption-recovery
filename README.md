@@ -21,7 +21,7 @@ Conventional voice assistants suffer from high turn rigidity and "barge-in" fail
 ---
 
 ## 4. Why Voice is Necessary
-Voice communication is intrinsically bidirectional, continuous, and dynamic. Unlike text chat where turns are atomic and strictly discrete, human conversation relies on real-time feedback cues, fast barge-ins, and conversational repairs. A truly natural voice assistant must support fluid turn invalidation with millisecond-level responsiveness.
+Voice communication is intrinsically bidirectional, continuous, and dynamic. Unlike text chat where turns are atomic and discrete, human conversation relies on real-time feedback cues, fast barge-ins, and conversational repairs. A natural voice assistant must support fluid turn invalidation with millisecond-level responsiveness.
 
 ---
 
@@ -30,52 +30,39 @@ Voice communication is intrinsically bidirectional, continuous, and dynamic. Unl
 
 ---
 
-## 6. High-Level Intended Architecture *(Planned)*
+## 6. Architecture & Concurrency Model *(Detailed in [docs/architecture.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/architecture.md))*
 
 ```
-                       ┌───────────────────────────────────────────────┐
-                       │               Client / Browser                │
-                       │   (Microphone Stream & Real-time Playback)    │
-                       └───────────────────────┬───────────────────────┘
-                                               │ Full-duplex WebSocket (Planned)
-                                               ▼
-                       ┌───────────────────────────────────────────────┐
-                       │          Voice Session Orchestrator           │
-                       │      (Interruption & Turn State Engine)       │
-                       └───────┬───────────────┬───────────────┬───────┘
-                               │               │               │
-                 [Cancel Stale]│               │               │[Audio Stream]
-                               ▼               ▼               ▼
-                 ┌───────────────────┐ ┌───────────────┐ ┌───────────────────┐
-                 │    Cancellation   │ │   STT & LLM   │ │   Rime TTS API    │
-                 │   Engine / Tasks  │ │   Pipelines   │ │ (Primary Spoken   │
-                 │     (Planned)     │ │   (Planned)   │ │  Output Engine)   │
-                 └───────────────────┘ └───────────────┘ └───────────────────┘
+Microphone Stream ──▶ Audio Input / VAD ──▶ STT Service ──▶ Turn Manager (Active Turn ID: N)
+                                                                │
+                                                                ▼
+Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LLM & Async Tools
 ```
 
-### Architectural Modules:
-1. **Voice Session Manager:** Maintains turn IDs, active generation tokens, and lifecycle state. *(Planned)*
-2. **Interruption & Cancellation Engine:** Tracks active asynchronous tasks (STT, LLM tokens, TTS audio streams) and immediately issues abort signals upon barge-in detection. *(Planned)*
-3. **Stale Guard Buffer:** Validates turn sequence tokens before any synthesized audio chunk is scheduled or dispatched to the client playback buffer. *(Planned)*
-4. **Rime TTS Service:** Streams ultra-low latency audio directly to the user. *(Planned / Integration Ready)*
+### Key Concurrency Principles:
+1. **Monotonic Turn Isolation:** Every session maintains a strictly increasing `active_turn_id`. All asynchronous tasks, LLM tokens, tool responses, and Rime TTS chunks carry an immutable `turn_id`.
+2. **Four-Tier Cancellation:** 
+   - *Tier 1 (Client):* Instant audio hardware buffer flush upon barge-in.
+   - *Tier 2 (Generation):* `asyncio.Task` cancellation on LLM streams.
+   - *Tier 3 (Tools):* In-flight async tool call abort.
+   - *Tier 4 (Logical):* Immediate invalidation of superseded turn state.
+3. **Core Architectural Axiom:**
+   > **"Cancellation is best-effort; stale-result rejection is the correctness guarantee."**  
+   Even if an obsolete worker completes late, the Stale Result Guard rejects any payload where `worker.turn_id != active_turn_id`.
+4. **Primary Rime TTS Spoken Output:** Expressive, ultra-low latency voice rendering managed through strict lifecycle states (`GENERATING` $\rightarrow$ `READY` $\rightarrow$ `PLAYING` $\rightarrow$ `COMPLETED` / `CANCELLED` / `STOPPED`).
 
 ---
 
 ## 7. Current Development Status
 - [x] **Phase 1: Problem Definition, Project Audit & Safe Foundation** *(Completed)*
-  - Problem framing & formal acceptance criteria established.
-  - Safe environment configuration and secret isolation verified.
-  - Minimal FastAPI application foundation with health checks established.
-  - Baseline testing suite implemented.
 - [x] **Phase 2: Acceptance Test, Success Metrics & Evaluation Specification** *(Completed)*
-  - Detailed 10-step acceptance test defined in [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md).
-  - Concrete Pass/Fail criteria and 5 quantifiable metrics specified.
-  - Normal and stress race-condition test scenarios documented.
-  - Repeatability protocol and empirical trial log template established.
-  - *Status:* **Phase 2 — Evaluation specification complete; implementation pending.**
-- [ ] **Phase 3: Core Interruption & Cancellation Architecture** *(Planned)*
-- [ ] **Phase 4: Rime TTS Streaming & Synthesis Integration** *(Planned)*
-- [ ] **Phase 5: Full Voice Pipeline (STT -> LLM -> Rime TTS)** *(Planned)*
+- [x] **Phase 3: System Architecture & Concurrency Design** *(Completed)*
+  - Full-duplex WebSocket architecture and component contracts designed in [docs/architecture.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/architecture.md).
+  - Multi-tier cancellation and stale-result guard mechanisms formalised.
+  - Rime audio lifecycle state machine and event logging schema defined.
+  - *Status:* **Phase 3 — Architecture designed; implementation pending.**
+- [ ] **Phase 4: Core Interruption Engine & Rime TTS Implementation** *(Planned)*
+- [ ] **Phase 5: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
 - [ ] **Phase 6: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
 ---
@@ -84,9 +71,6 @@ Voice communication is intrinsically bidirectional, continuous, and dynamic. Unl
 
 ### What is Being Tested:
 The assistant's ability to gracefully handle mid-turn interruptions: immediately halting obsolete Rime speech, aborting or invalidating stale background tasks, suppressing outdated results, and responding solely to the user's revised request.
-
-### Why Interruption is Difficult in Voice Systems:
-Unlike discrete text exchanges, voice involves overlapping asynchronous pipelines (streaming ASR, token-by-token LLM generation, streaming TTS synthesis, and client audio buffer queues). A mid-turn interruption creates race conditions where delayed responses can collide with new requests unless guarded by turn-version isolation.
 
 ### Key Evaluation Metrics *(Detailed in [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md))*:
 - **Interruption-to-Audio-Stop Latency:** Target $< 250$ ms (*Status: NOT YET MEASURED*).
