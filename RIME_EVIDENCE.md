@@ -1,55 +1,100 @@
 # Rime Voice Evidence & Acceptance Test Specification
 
-## 1. Hard Voice Problem
-**Interruption and Recovery in Conversational Voice AI**
-
-In natural spoken conversations, humans frequently interrupt speakers mid-utterance to amend instructions, provide missing constraints, or correct misunderstandings. In voice AI systems, handling this gracefully requires immediate audio cessation, asynchronous task cancellation, stale result invalidation, and seamless continuation from the user's latest intent.
+**Project:** Voice AI Assistant with Interruption & Recovery  
+**Hackathon:** DataForge 2026 Rime Hackathon  
+**Primary TTS Provider:** Rime Labs (Conversational Ultra-Low Latency Speech)  
+**Detailed Specification:** See [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md)
 
 ---
 
-## 2. Formal Acceptance Test Scenario
+## 1. Hard Voice Problem
+**Interruption & Recovery in Conversational Voice AI**
 
-The core technical claim will be evaluated against the following strict 8-step end-to-end test sequence:
+When a user interrupts an ongoing AI voice response and changes their request, conversational voice assistants often suffer from audio lag, obsolete speech bleed, stale background execution races, and context corruption. Solving this requires strict turn invalidation, immediate Rime audio cutoff, and rapid recovery to the user's latest intent.
+
+---
+
+## 2. Core Technical Claim
+> **"When a user interrupts an ongoing voice response and changes their request, the system promptly stops obsolete Rime speech, invalidates/cancels obsolete work, prevents stale results from being spoken, and responds only to the latest request."**
+
+---
+
+## 3. Formal 10-Step Acceptance Test Scenario
 
 ```
-[1. Rime Speaking] ──▶ [2. User Interrupts] ──▶ [3. User Revises Request]
-                                                        │
-                                                        ▼
-[6. Block Stale Results] ◀── [5. Invalidate Turn] ◀── [4. Stop Rime Audio Promptly]
+[1. User Turn T1] ──▶ [2. Assistant Speaks via Rime] ──▶ [3. User Barge-in Interruption]
+                                                                    │
+                                                                    ▼
+[6. Block Stale Output] ◀── [5. Invalidate Obsolete Work] ◀── [4. Stop Rime Audio Immediately]
          │
          ▼
-[7. Process Latest Request] ──▶ [8. Speak Final Correct Response via Rime]
+[7. Transition to Turn T2] ──▶ [8. Ingest Revised Request] ──▶ [9. Process Turn T2]
+                                                                    │
+                                                                    ▼
+                                               [10. Speak Correct T2 Response via Rime]
 ```
 
-### Detailed Sequence:
-1. **Initial Spoken Output:** The assistant begins streaming a conversational response through Rime TTS in response to turn $T_1$.
-2. **User Barge-in:** The user speaks while the assistant audio response is actively playing OR while an asynchronous tool/LLM operation is pending.
-3. **Request Revision:** The user amends or replaces their previous instruction with new parameters (turn $T_2$).
-4. **Immediate Audio Cutoff:** All in-flight Rime audio playback and streaming buffers for turn $T_1$ must stop promptly on the client.
-5. **Asynchronous Cancellation:** Any in-flight background generation or synthesis for turn $T_1$ must be cancelled or marked invalidated.
-6. **Stale Result Prevention:** Any residual chunks or completed responses from turn $T_1$ must NOT be spoken by Rime.
-7. **Latest Turn Processing:** The assistant processes turn $T_2$ without contamination from $T_1$.
-8. **Correct Spoken Resolution:** The final audio streamed through Rime must correspond strictly to the latest request ($T_2$).
+### End-to-End Sequence:
+1. User sends an initial voice request ($T_1$).
+2. Assistant begins processing and streaming the response through Rime TTS.
+3. User interrupts before the response completes.
+4. User changes or corrects part of the request ($T_2$).
+5. System recognizes $T_2$ as the active request.
+6. Obsolete Rime speech stops promptly on the client.
+7. Obsolete background work for $T_1$ is cancelled or invalidated.
+8. Late results from $T_1$ are never spoken as the current response.
+9. Latest request ($T_2$) is processed cleanly.
+10. Final spoken response corresponds strictly to $T_2$.
 
 ---
 
-## 3. Planned Measurable Metrics
+## 4. Pass / Fail Evaluation Criteria
 
-| Metric | Description | Target Specification | Measured Result | Status |
+### Strict PASS Requirements:
+- **Condition A:** User interruption accepted during active speech or wait states.
+- **Condition B:** Obsolete Rime audio halts immediately upon barge-in.
+- **Condition C:** Previous turn ($T_1$) cannot overwrite or race with $T_2$.
+- **Condition D:** Stale LLM/tool results from $T_1$ are blocked from Rime synthesis.
+- **Condition E:** Revised request reaches active conversation state.
+- **Condition F:** Final spoken response corresponds strictly to $T_2$.
+- **Condition G:** Session remains healthy and interactive for subsequent turns.
+
+### Failure Classification:
+- **CRITICAL FAIL:** Old speech continues; old result spoken after new request; new request dropped; old turn overwrites new state; system deadlocks or crashes; final output answers obsolete query.
+- **NON-CRITICAL IMPERFECTION:** Harmless buffer drain artifact under 100ms; benign log warning for aborted connection.
+
+---
+
+## 5. Measurable Metrics Specification
+
+| Metric | Measurement Window | Data Source | Expected Behavior | Current Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Interruption-to-Audio-Stop Latency** | Time between user speech detection and cessation of Rime audio playback | $< 250$ ms | *NOT YET MEASURED* | Planned for Phase 5 |
-| **Stale Response Leak Count** | Number of obsolete / invalidated response phrases played out loud | $0$ leaks | *NOT YET MEASURED* | Planned for Phase 5 |
-| **Turn Cancellation Efficacy** | Percentage of obsolete background LLM/TTS tasks successfully aborted | $100\%$ | *NOT YET MEASURED* | Planned for Phase 5 |
-| **Recovery Accuracy Rate** | Rate at which the final spoken response satisfies the amended intent | $> 95\%$ | *NOT YET MEASURED* | Planned for Phase 5 |
-| **Rime TTS Time-to-First-Audio (TTFA)** | Latency from text token availability to initial Rime audio chunk | $< 200$ ms | *NOT YET MEASURED* | Planned for Phase 3 |
+| **Interruption-to-Audio-Stop Latency** | Interruption detection $\rightarrow$ Audio halt | Client playback log & WS trace | $< 250$ ms | **NOT YET MEASURED** |
+| **Stale-Response Count** | Acceptance of $T_2 \rightarrow$ End of session | Frame auditor & transcript logs | $0$ stale responses | **NOT YET MEASURED** |
+| **Recovery Success Rate** | Multi-trial benchmark run | Automated test harness | $\ge 95\%$ | **NOT YET MEASURED** |
+| **Latest-Turn Correctness** | Turn $T_2$ completion | Semantic intent evaluator | $100\%$ accuracy | **NOT YET MEASURED** |
+| **Post-Interruption Usability** | Recovery response $\rightarrow$ Next turn $T_3$ | Interactive roundtrip probe | $100\%$ operational | **NOT YET MEASURED** |
 
 ---
 
-## 4. Empirical Evidence Log
+## 6. Normal & Stress Test Scenarios
 
-> **Note:** Real benchmark runs, recorded audio session traces, and latency logs will be documented in this section as implementation progresses through subsequent phases. No placeholder metrics or simulated data are permitted.
+- **Normal Interruption Scenario:** User queries weather for Delhi, interrupts mid-speech to ask for Mumbai. Assistant immediately cuts off Delhi speech and speaks Mumbai weather. (`STATUS: SPECIFICATION ONLY`)
+- **Stress & Race-Condition Scenario:** Artificial 2-3s delay on $T_1$ flight query. User interrupts to change destination to London. $T_1$ returns late but is immediately discarded by the Stale Guard Buffer without being spoken. (`STATUS: SPECIFICATION ONLY`)
 
-- **Phase 1 Verification:**
-  - Acceptance criteria formalized: `PASSED`
-  - Secret isolation & backend foundation: `PASSED`
-  - Real voice benchmarks: *NOT YET MEASURED*
+---
+
+## 7. Evidence Collection Plan
+1. Live screen and audio recordings of normal and interrupted voice interactions.
+2. Stress test demo visualizing late result cancellation.
+3. Timestamped client/server event logs measuring audio-stop latency.
+4. 20-trial empirical evaluation log documented in [docs/test-results.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/test-results.md).
+5. Zero-stale result verification audit logs.
+6. Full configuration and hardware environment details.
+
+---
+
+## 8. Empirical Evidence Status
+- **Phase 1 Foundation:** `PASSED`
+- **Phase 2 Evaluation Specification:** `PASSED`
+- **Phase 3+ Real Benchmarks:** *NOT YET MEASURED (Pending Implementation)*

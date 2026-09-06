@@ -67,18 +67,33 @@ Voice communication is intrinsically bidirectional, continuous, and dynamic. Unl
   - Safe environment configuration and secret isolation verified.
   - Minimal FastAPI application foundation with health checks established.
   - Baseline testing suite implemented.
-- [ ] **Phase 2: Core Interruption & Cancellation Architecture** *(Planned)*
-- [ ] **Phase 3: Rime TTS Streaming & Synthesis Integration** *(Planned)*
-- [ ] **Phase 4: Full Voice Pipeline (STT -> LLM -> Rime TTS)** *(Planned)*
-- [ ] **Phase 5: Automated Interruption & Recovery Benchmarking** *(Planned)*
+- [x] **Phase 2: Acceptance Test, Success Metrics & Evaluation Specification** *(Completed)*
+  - Detailed 10-step acceptance test defined in [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md).
+  - Concrete Pass/Fail criteria and 5 quantifiable metrics specified.
+  - Normal and stress race-condition test scenarios documented.
+  - Repeatability protocol and empirical trial log template established.
+  - *Status:* **Phase 2 — Evaluation specification complete; implementation pending.**
+- [ ] **Phase 3: Core Interruption & Cancellation Architecture** *(Planned)*
+- [ ] **Phase 4: Rime TTS Streaming & Synthesis Integration** *(Planned)*
+- [ ] **Phase 5: Full Voice Pipeline (STT -> LLM -> Rime TTS)** *(Planned)*
+- [ ] **Phase 6: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
 ---
 
-## 8. Planned Evaluation Approach
-The system's core claim will be validated using rigorous automated and live acceptance tests:
-- **Interruption Latency:** Measuring time delta between user barge-in speech detection and Rime audio stream cutoff.
-- **Stale Response Zero-Tolerance:** Quantifying turn bleed rate across multi-turn rapid-interruption sequences (target: 0 stale audio frames played).
-- **Turn Recovery Accuracy:** Verifying that final spoken audio answers the revised query rather than superseded instructions.
+## 8. Evaluation & Acceptance Criteria
+
+### What is Being Tested:
+The assistant's ability to gracefully handle mid-turn interruptions: immediately halting obsolete Rime speech, aborting or invalidating stale background tasks, suppressing outdated results, and responding solely to the user's revised request.
+
+### Why Interruption is Difficult in Voice Systems:
+Unlike discrete text exchanges, voice involves overlapping asynchronous pipelines (streaming ASR, token-by-token LLM generation, streaming TTS synthesis, and client audio buffer queues). A mid-turn interruption creates race conditions where delayed responses can collide with new requests unless guarded by turn-version isolation.
+
+### Key Evaluation Metrics *(Detailed in [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md))*:
+- **Interruption-to-Audio-Stop Latency:** Target $< 250$ ms (*Status: NOT YET MEASURED*).
+- **Stale Response Count:** Target $0$ leaks (*Status: NOT YET MEASURED*).
+- **Recovery Success Rate:** Target $\ge 95\%$ across 20 trials (*Status: NOT YET MEASURED*).
+- **Latest-Turn Correctness:** Target $100\%$ (*Status: NOT YET MEASURED*).
+- **Post-Interruption Usability:** Target $100\%$ operational uptime (*Status: NOT YET MEASURED*).
 
 ---
 
