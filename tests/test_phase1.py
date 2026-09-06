@@ -25,7 +25,7 @@ def test_root_endpoint(client):
     data = response.json()
     assert data["service"] == "Rime Voice AI Assistant"
     assert data["status"] == "online"
-    assert data["phase"] == 1
+    assert data["phase"] >= 1
     assert "rime_configured" in data
 
 

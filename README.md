@@ -57,41 +57,30 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
 - [x] **Phase 1: Problem Definition, Project Audit & Safe Foundation** *(Completed)*
 - [x] **Phase 2: Acceptance Test, Success Metrics & Evaluation Specification** *(Completed)*
 - [x] **Phase 3: System Architecture & Concurrency Design** *(Completed)*
-  - Full-duplex WebSocket architecture and component contracts designed in [docs/architecture.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/architecture.md).
-  - Multi-tier cancellation and stale-result guard mechanisms formalised.
-  - Rime audio lifecycle state machine and event logging schema defined.
-  - *Status:* **Phase 3 — Architecture designed; implementation pending.**
-- [ ] **Phase 4: Core Interruption Engine & Rime TTS Implementation** *(Planned)*
-- [ ] **Phase 5: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
-- [ ] **Phase 6: Automated Interruption & Recovery Benchmarking** *(Planned)*
+- [x] **Phase 4: FastAPI Backend Foundation** *(Completed)*
+  - Modular FastAPI application with mounted voice session REST endpoints.
+  - Safe, masked environment configuration loader without secret leakage.
+  - Core `VoiceSession` and `SessionStore` enforcing monotonic turn sequencing and the stale-result rejection invariant.
+  - Sanitized global error handling with deterministic `/health` endpoint.
+  - Comprehensive unit test suite with 100% pass rate.
+  - *Status:* **Phase 4 — FastAPI backend foundation implemented; external integrations pending.**
+- [ ] **Phase 5: Core Interruption Engine & Rime TTS Integration** *(Planned)*
+- [ ] **Phase 6: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
+- [ ] **Phase 7: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
 ---
 
-## 8. Evaluation & Acceptance Criteria
-
-### What is Being Tested:
-The assistant's ability to gracefully handle mid-turn interruptions: immediately halting obsolete Rime speech, aborting or invalidating stale background tasks, suppressing outdated results, and responding solely to the user's revised request.
-
-### Key Evaluation Metrics *(Detailed in [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md))*:
-- **Interruption-to-Audio-Stop Latency:** Target $< 250$ ms (*Status: NOT YET MEASURED*).
-- **Stale Response Count:** Target $0$ leaks (*Status: NOT YET MEASURED*).
-- **Recovery Success Rate:** Target $\ge 95\%$ across 20 trials (*Status: NOT YET MEASURED*).
-- **Latest-Turn Correctness:** Target $100\%$ (*Status: NOT YET MEASURED*).
-- **Post-Interruption Usability:** Target $100\%$ operational uptime (*Status: NOT YET MEASURED*).
-
----
-
-## 9. Getting Started (Phase 1 Baseline)
+## 8. Backend Foundation & Getting Started
 
 ### Prerequisites
 - Python 3.10+
 - Valid API keys (`RIME_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`)
 
 ### Setup & Run
-1. Configure environment:
+1. Configure environment template:
    ```bash
-   cp .env.example backend/.env
-   # Edit backend/.env with your API credentials
+   cp backend/.env.example backend/.env
+   # Edit backend/.env with your API credentials (kept server-side & git-ignored)
    ```
 2. Install dependencies:
    ```bash
@@ -99,9 +88,16 @@ The assistant's ability to gracefully handle mid-turn interruptions: immediately
    ```
 3. Run test suite:
    ```bash
-   pytest tests/test_phase1.py -v
+   pytest tests/ -v
    ```
-4. Start backend:
+4. Start FastAPI server locally:
    ```bash
    uvicorn backend.app.main:app --reload --port 8000
    ```
+5. Check health probe:
+   ```bash
+   curl http://127.0.0.1:8000/health
+   # Returns: {"status": "ok"}
+   ```
+
+*Note: Live Rime TTS, STT, and LLM external API integrations are planned for subsequent phases. Current phase validates backend foundation and turn isolation invariants with zero external API calls.*

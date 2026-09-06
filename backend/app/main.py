@@ -1,28 +1,91 @@
-"""Main FastAPI Application Entrypoint."""
+"""Main FastAPI Application Entrypoint
 
-from fastapi import FastAPI
+FastAPI gateway configuring routes, deterministic health probes,
+safe global error handlers, and router mount points.
+"""
+
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from backend.app.config import get_settings
+from backend.app.api.voice import router as voice_router
+from backend.app.models.schemas import HealthResponse, RootStatusResponse
 
 app = FastAPI(
     title="Rime Voice AI Assistant with Interruption & Recovery",
-    description="DataForge 2026 Rime Hackathon - Phase 1 Foundation",
-    version="0.1.0",
+    description="DataForge 2026 Rime Hackathon - Phase 4 FastAPI Backend Foundation",
+    version="0.2.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
+# Mount API Routers
+app.include_router(voice_router, prefix="/api")
 
-@app.get("/health")
+
+# Global Safe Error Handlers
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Clean JSON response for HTTP exceptions without exposing server stack traces."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail, "status_code": exc.status_code},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Sanitized validation error response."""
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": "Request validation failed",
+            "status_code": status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "details": exc.errors(),
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Generic fallback error handler guaranteeing zero credential or internal trace leakage."""
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": "Internal server error occurred",
+            "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+        },
+    )
+
+
+# Core System Endpoints
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["System"],
+    summary="Health Check",
+    description="Deterministic health probe endpoint.",
+)
 def health_check():
-    """Health check endpoint."""
+    """Health check endpoint returning deterministic status."""
     return {"status": "ok"}
 
 
-@app.get("/")
+@app.get(
+    "/",
+    response_model=RootStatusResponse,
+    tags=["System"],
+    summary="Root Status",
+    description="Returns high-level service status and configuration readiness without secrets.",
+)
 def root():
     """Root endpoint for status information."""
     settings = get_settings()
     return {
         "service": "Rime Voice AI Assistant",
         "status": "online",
-        "phase": 1,
+        "phase": 4,
         "rime_configured": settings.is_rime_configured,
     }
