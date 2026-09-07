@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { defaultPlaybackManager, PlaybackState, AudioEventType } from './services/audio.js';
 import { defaultApiClient } from './services/api.js';
+import { defaultRecorder, RecorderState } from './services/recorder.js';
 import SpeakingIndicator from './components/SpeakingIndicator.jsx';
 import Status from './components/Status.jsx';
 import VoiceButton from './components/VoiceButton.jsx';
@@ -14,9 +15,11 @@ export default function App() {
   const [events, setEvents] = useState([]);
   const [ttsText, setTtsText] = useState('Rime voice synthesis with interruption recovery.');
   const [isLoading, setIsLoading] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [backendStatus, setBackendStatus] = useState(null);
 
-  // Initialize session and subscribe to Playback Manager events
+  // Initialize session and subscribe to Playback Manager & Recorder events
   useEffect(() => {
     // 1. Subscribe to playback state changes
     const unsubState = defaultPlaybackManager.onStateChange((state, prevState, audio) => {
@@ -29,7 +32,16 @@ export default function App() {
       setEvents((prev) => [evt, ...prev.slice(0, 49)]);
     });
 
-    // 3. Initialize backend session
+    // 3. Subscribe to microphone recorder state changes
+    const unsubRecorder = defaultRecorder.onStateChange((state) => {
+      setIsRecording(state === RecorderState.RECORDING);
+      if (state === RecorderState.ERROR) {
+        setIsRecording(false);
+        setIsTranscribing(false);
+      }
+    });
+
+    // 4. Initialize backend session
     async function init() {
       try {
         const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json());
@@ -48,6 +60,7 @@ export default function App() {
     return () => {
       unsubState();
       unsubEvents();
+      unsubRecorder();
     };
   }, []);
 
@@ -60,6 +73,67 @@ export default function App() {
       defaultPlaybackManager.setActiveTurn(updatedSess.active_turn_id);
     } catch (err) {
       console.error('Failed to advance turn:', err);
+    }
+  };
+
+  // Handler: Push-to-Talk Microphone Record & Transcribe
+  const handleToggleRecord = async () => {
+    if (isRecording) {
+      // Finish recording and transcribe
+      try {
+        const result = await defaultRecorder.stopRecording();
+        if (!result || !result.blob) return;
+
+        setIsTranscribing(true);
+
+        // Ensure active turn >= 1
+        let targetTurn = activeTurnId;
+        if (targetTurn === 0) {
+          const turnRes = await defaultApiClient.createTurn(sessionId);
+          targetTurn = turnRes.active_turn_id;
+          setActiveTurnId(targetTurn);
+          defaultPlaybackManager.setActiveTurn(targetTurn);
+        }
+
+        const transcription = await defaultApiClient.transcribeAudio({
+          audioBlob: result.blob,
+          sessionId,
+          turnId: targetTurn,
+        });
+
+        if (transcription && transcription.text) {
+          setTtsText(transcription.text);
+          setEvents((prev) => [
+            {
+              event_type: 'STT_TRANSCRIPTION_SUCCESS',
+              timestamp_ms: Date.now(),
+              session_id: sessionId,
+              turn_id: targetTurn,
+              state: playbackState,
+              details: {
+                text: transcription.text,
+                provider: transcription.provider,
+                model: transcription.model,
+                audioDurationMs: result.durationMs,
+              },
+            },
+            ...prev.slice(0, 49),
+          ]);
+        }
+      } catch (err) {
+        console.error('Transcription error:', err);
+        alert(`STT Error: ${err.message}`);
+      } finally {
+        setIsTranscribing(false);
+      }
+    } else {
+      // Start recording
+      try {
+        await defaultRecorder.startRecording();
+      } catch (err) {
+        console.error('Microphone access error:', err);
+        alert(`Microphone Error: ${err.message}`);
+      }
     }
   };
 
@@ -117,7 +191,7 @@ export default function App() {
           <h1>Rime Voice AI Assistant</h1>
         </div>
         <p className="app-tagline">
-          Phase 6 — Conversational Audio Delivery & Playback Pipeline with Interruption Protection
+          Phase 7 — Push-to-Talk Speech-to-Text & Rime Spoken Output Pipeline
         </p>
       </header>
 
@@ -137,6 +211,9 @@ export default function App() {
           onAdvanceTurn={handleAdvanceTurn}
           onSynthesizeAndPlay={handleSynthesizeAndPlay}
           onStop={handleStopAudio}
+          onToggleRecord={handleToggleRecord}
+          isRecording={isRecording}
+          isTranscribing={isTranscribing}
           isLoading={isLoading}
           activeTurnId={activeTurnId}
         />
@@ -145,7 +222,7 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <span>DataForge 2026 Rime Hackathon &bull; Phase 6 Audio Pipeline</span>
+        <span>DataForge 2026 Rime Hackathon &bull; Phase 7 STT Pipeline</span>
       </footer>
     </div>
   );

@@ -17,8 +17,18 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 6
+    phase: int = 7
     rime_configured: bool = False
+
+
+class TranscriptionResponse(BaseModel):
+    """Structured response model for Speech-to-Text transcription."""
+    session_id: Optional[str] = Field(default=None, description="Associated session ID")
+    turn_id: Optional[int] = Field(default=None, description="Associated turn ID")
+    text: str = Field(..., description="Transcribed speech text")
+    provider: str = Field(default="groq", description="STT Provider name")
+    model: str = Field(..., description="STT Model used")
+    status: str = Field(default="SUCCESS", description="Transcription status")
 
 
 class RimeTTSRequest(BaseModel):

@@ -93,7 +93,8 @@ When a user interrupts an ongoing AI voice response and changes their request, c
 - **Phase 4 FastAPI Backend Foundation:** `PASSED`
 - **Phase 5 Genuine Rime TTS Integration:** `PASSED`
 - **Phase 6 Audio Delivery & Playback Pipeline:** `PASSED`
-- **Phase 7+ Full Pipeline & Interruption Benchmarks:** *Pending Phase 7+ Implementation*
+- **Phase 7 Speech-to-Text Integration:** `PASSED`
+- **Phase 8+ Full Pipeline & Interruption Benchmarks:** *Pending Phase 8+ Implementation*
 
 ---
 
@@ -196,5 +197,51 @@ Automated test suite (`frontend/tests/playback_manager.test.mjs`):
 
 ### Security Verification
 - Zero `RIME_API_KEY` or credentials present in frontend client or bundle. All synthesis requests proxy through backend FastAPI gateway.
+
+---
+
+## 10. Phase 7 Speech-to-Text Integration Evidence
+
+### Provider Separation & Role Clarity
+- **Primary Spoken Output (TTS):** Rime Labs (`https://users.rime.ai/v1/rime-tts`, model `coda`, speaker `celeste`).
+- **Spoken Input / Speech-to-Text (STT):** Groq Whisper (`https://api.groq.com/openai/v1/audio/transcriptions`, model `whisper-large-v3`).
+- **Architectural Boundary:** Rime is exclusively the spoken-output voice provider. Groq is utilized strictly for real-time speech transcription.
+
+### Real Groq STT Verification (Single Live Request Evidence)
+
+> [!IMPORTANT]
+> **Single Real Request Guarantee:** In strict compliance with API quota preservation rules, exactly ONE real Groq STT transcription request was executed during Phase 7 verification. No loops or automated test suite integrations call the live API.
+
+| Field | Verification Value |
+| :--- | :--- |
+| **Request Attempted** | `YES` |
+| **Verification Timestamp** | `2026-09-07T04:41:40Z` (Local: `2026-09-07 10:11:40 IST`) |
+| **Target Endpoint** | `https://api.groq.com/openai/v1/audio/transcriptions` |
+| **STT Provider** | `groq` |
+| **Model ID** | `whisper-large-v3` |
+| **Language** | `en` |
+| **Audio Input Size** | `56,160 bytes` |
+| **Transcribed Output** | `"Hello, this is a speech recognition test."` |
+| **HTTP Status Code** | `200 OK` |
+| **Measured Roundtrip Latency** | `1,951.94 ms` |
+| **Credential Security** | `ZERO secrets logged, exposed, or committed` (`GROQ_API_KEY` loaded server-side only) |
+
+### Unit Tests (Mocked Boundary Evidence)
+
+Automated tests in `tests/test_stt.py` verify all STT ingestion mechanics without consuming live API quota:
+- `test_groq_stt_successful_transcription`: Verifies multipart form construction, headers, and `TranscriptionResponse` mapping.
+- `test_groq_stt_empty_audio_raises`: Verifies client-side validation on empty audio payload before network call.
+- `test_groq_stt_unconfigured_api_key_raises`: Verifies clean error handling when `GROQ_API_KEY` is missing.
+- `test_groq_stt_upstream_error_handling`: Verifies 400/401/429/500 upstream error sanitization without secret exposure.
+- `test_api_transcribe_missing_session`: Verifies HTTP 404 for unknown session.
+- `test_api_transcribe_superseded_turn`: Verifies HTTP 409 when transcribing audio for an invalidated turn.
+- `test_api_transcribe_empty_file`: Verifies HTTP 400 rejection for empty file upload.
+- `test_api_transcribe_success_with_mocked_service`: Verifies HTTP 200 JSON transcription response with `session_id`, `turn_id`, `transcript`, and metadata.
+
+### Push-to-Talk Microphone & Audio Recording
+- **Browser Service:** `MicrophoneRecorder` (`frontend/src/services/recorder.js`) handles native `MediaRecorder` / `getUserMedia` audio capture with MIME type auto-detection (`audio/webm`, `audio/mp4`, `audio/ogg`).
+- **UI Integration:** `VoiceButton` component provides Push-to-Talk recording control with state feedback (`Record Voice (Mic PTT)` $\rightarrow$ `Recording... (Click to Finish)` $\rightarrow$ `Transcribing Speech...`) and automatically populates transcribed text into the active turn input.
+- **Frontend Test Suite:** 10/10 automated tests passing.
+
 
 

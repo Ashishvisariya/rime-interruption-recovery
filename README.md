@@ -60,14 +60,15 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
 - [x] **Phase 4: FastAPI Backend Foundation** *(Completed)*
 - [x] **Phase 5: Real Rime TTS Integration** *(Completed)*
 - [x] **Phase 6: Rime Audio Delivery & Playback Pipeline** *(Completed)*
-  - Client-side `AudioPlaybackManager` with 9-state deterministic machine (`IDLE` $\rightarrow$ `LOADING` $\rightarrow$ `READY` $\rightarrow$ `PLAYING` $\rightarrow$ `COMPLETED` / `STOPPED` / `DISCARDED`).
-  - Monotonic turn isolation rejecting stale audio from older turns ($T_{audio} < T_{active}$).
-  - Immediate audio stop & buffer flush mechanism (`stopCurrentAudio`) for barge-in interruptions.
-  - Interactive React web application with speaking visualizer orb, turn sequence manager, and live event audit stream.
-  - 100% automated test pass rate across backend (31 tests) and frontend playback manager (10 tests).
-  - *Status:* **Phase 6 — Rime audio playback pipeline implemented; interruption detection and recovery pending.**
-- [ ] **Phase 7: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
-- [ ] **Phase 8: Automated Interruption & Recovery Benchmarking** *(Planned)*
+- [x] **Phase 7: Speech-to-Text Integration** *(Completed)*
+  - Server-side `GroqSTTService` integrating Groq Whisper (`whisper-large-v3`) via multipart audio upload.
+  - Backend `POST /api/voice/transcribe` endpoint with session and turn invariant enforcement.
+  - Client-side `MicrophoneRecorder` service capturing microphone input with `MediaRecorder` / `getUserMedia`.
+  - Push-to-Talk (PTT) interactive UI button with real-time state feedback and prompt pre-fill.
+  - 100% automated test pass rate across backend (39 tests) and frontend (10 tests).
+  - *Status:* **Phase 7 — Speech-to-text implemented; LLM and interruption pipeline pending.**
+- [ ] **Phase 8: Full Voice Pipeline (LLM -> Tools -> Full Duplex Recovery)** *(Planned)*
+- [ ] **Phase 9: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
 ---
 
@@ -115,6 +116,7 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
    ```
 3. Open browser at `http://localhost:5173`.
 4. Interact with the voice assistant:
+   - **Record Voice (Mic PTT):** Click the Push-to-Talk button, grant microphone permission, speak your prompt, and click to finish recording. Audio is sent to `/api/voice/transcribe` and the transcript is populated directly into the input field.
    - **Advance Turn:** Atomically advances monotonic turn $N \rightarrow N+1$.
    - **Synthesize & Play Rime Audio:** Fetches genuine Rime audio from `/api/voice/tts` and streams via `AudioPlaybackManager`.
    - **Stop / Interrupt Speech:** Immediately halts active audio output, detaches media stream, and logs the interruption event.

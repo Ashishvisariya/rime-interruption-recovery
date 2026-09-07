@@ -5,11 +5,12 @@ Full-duplex real-time streaming WebSockets will be wired in Phase 5+.
 """
 
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel
 from backend.app.core.session import default_session_store
-from backend.app.models.schemas import VoiceSessionInfo, RimeTTSRequest
+from backend.app.models.schemas import VoiceSessionInfo, RimeTTSRequest, TranscriptionResponse
 from backend.app.services.rime_tts import default_rime_service, RimeTTSError
+from backend.app.services.stt import default_stt_service, STTError
 
 router = APIRouter(prefix="/voice", tags=["Voice Sessions"])
 
@@ -145,4 +146,61 @@ async def synthesize_speech(request: RimeTTSRequest) -> Response:
     }
 
     return Response(content=audio_bytes, media_type=media_type, headers=headers)
+
+
+@router.post(
+    "/transcribe",
+    response_model=TranscriptionResponse,
+    summary="Transcribe Speech to Text via Groq Whisper",
+    description="Transcribes uploaded speech audio to text using genuine Groq Whisper STT API.",
+)
+async def transcribe_speech(
+    file: UploadFile = File(..., description="Binary speech audio file"),
+    session_id: Optional[str] = Form(default=None, description="Optional associated session ID"),
+    turn_id: Optional[int] = Form(default=None, description="Optional associated turn ID"),
+    language: Optional[str] = Form(default="en", description="Spoken language ISO code"),
+    model: Optional[str] = Form(default=None, description="Optional Whisper model override"),
+) -> TranscriptionResponse:
+    """STT Endpoint accepting audio uploads and returning structured transcriptions."""
+    # 1. Validate session if session_id is provided
+    if session_id:
+        session = default_session_store.get_session(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session '{session_id}' not found.",
+            )
+
+    # 2. Read audio payload
+    audio_bytes = await file.read()
+    if not audio_bytes or len(audio_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded audio file cannot be empty.",
+        )
+
+    # 3. Call STT Service
+    try:
+        result = await default_stt_service.transcribe(
+            audio_bytes=audio_bytes,
+            filename=file.filename or "audio.webm",
+            mime_type=file.content_type or "audio/webm",
+            language=language,
+            model=model,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except STTError as e:
+        status_code = status.HTTP_502_BAD_GATEWAY if (e.status_code is None or e.status_code >= 500) else e.status_code
+        raise HTTPException(
+            status_code=status_code,
+            detail=str(e),
+        )
+
 

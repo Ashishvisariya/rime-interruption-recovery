@@ -102,6 +102,42 @@ export class VoiceApiClient {
 
     return { blob, headers };
   }
+
+  /**
+   * Send speech audio to backend for Groq Whisper transcription.
+   * @param {Object} params
+   * @param {Blob} params.audioBlob
+   * @param {string} [params.sessionId]
+   * @param {number} [params.turnId]
+   * @param {string} [params.language]
+   * @param {string} [params.model]
+   * @returns {Promise<{ session_id: string, turn_id: number, text: string, provider: string, model: string, status: string }>}
+   */
+  async transcribeAudio({ audioBlob, sessionId = null, turnId = null, language = 'en', model = null }) {
+    const formData = new FormData();
+    const filename = audioBlob.type.includes('mp4') ? 'recording.mp4' : audioBlob.type.includes('ogg') ? 'recording.ogg' : 'recording.webm';
+    formData.append('file', audioBlob, filename);
+
+    if (sessionId) formData.append('session_id', sessionId);
+    if (turnId !== null && turnId !== undefined) formData.append('turn_id', String(turnId));
+    if (language) formData.append('language', language);
+    if (model) formData.append('model', model);
+
+    const res = await fetch(`${this.baseUrl}/voice/transcribe`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({ error: res.statusText }));
+      const error = new Error(errData.error || `Audio transcription failed (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
+
+    return res.json();
+  }
 }
 
 export const defaultApiClient = new VoiceApiClient();
+

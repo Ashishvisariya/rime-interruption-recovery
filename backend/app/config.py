@@ -46,6 +46,14 @@ class Settings(BaseModel):
         default_factory=lambda: os.getenv("RIME_DEFAULT_FORMAT", "mp3")
     )
 
+    # Groq STT Configuration
+    groq_stt_url: str = Field(
+        default_factory=lambda: os.getenv("GROQ_STT_URL", "https://api.groq.com/openai/v1/audio/transcriptions")
+    )
+    groq_stt_model: str = Field(
+        default_factory=lambda: os.getenv("GROQ_STT_MODEL", "whisper-large-v3")
+    )
+
     def validate_required_keys(self) -> None:
         """Validate that all required environment variables are present and non-empty.
         
