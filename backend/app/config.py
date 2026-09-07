@@ -54,6 +54,14 @@ class Settings(BaseModel):
         default_factory=lambda: os.getenv("GROQ_STT_MODEL", "whisper-large-v3")
     )
 
+    # Groq LLM Configuration
+    groq_llm_url: str = Field(
+        default_factory=lambda: os.getenv("GROQ_LLM_URL", "https://api.groq.com/openai/v1/chat/completions")
+    )
+    groq_model: str = Field(
+        default_factory=lambda: os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
+    )
+
     def validate_required_keys(self) -> None:
         """Validate that all required environment variables are present and non-empty.
         

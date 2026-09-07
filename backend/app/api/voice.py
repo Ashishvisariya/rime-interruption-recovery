@@ -8,9 +8,16 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel
 from backend.app.core.session import default_session_store
-from backend.app.models.schemas import VoiceSessionInfo, RimeTTSRequest, TranscriptionResponse
+from backend.app.models.schemas import (
+    VoiceSessionInfo,
+    RimeTTSRequest,
+    TranscriptionResponse,
+    LLMRequest,
+    LLMResponse,
+)
 from backend.app.services.rime_tts import default_rime_service, RimeTTSError
 from backend.app.services.stt import default_stt_service, STTError
+from backend.app.services.llm import default_llm_service, GroqLLMServiceError
 
 router = APIRouter(prefix="/voice", tags=["Voice Sessions"])
 
@@ -202,5 +209,77 @@ async def transcribe_speech(
             status_code=status_code,
             detail=str(e),
         )
+
+
+@router.post(
+    "/respond",
+    response_model=LLMResponse,
+    summary="Generate LLM Voice Response via Groq",
+    description="Generates conversational response text using Groq LLM with two-phase turn validation.",
+    responses={
+        200: {"description": "LLM response text and generation metadata."},
+        400: {"description": "Validation error or invalid message payload."},
+        404: {"description": "Session not found."},
+        409: {"description": "Turn superseded before or during LLM generation."},
+        502: {"description": "Upstream Groq API communication error."},
+    },
+)
+async def respond_with_llm(request: LLMRequest) -> LLMResponse:
+    """LLM generation endpoint with monotonic turn validation and stale response rejection."""
+    session = None
+    if request.session_id:
+        session = default_session_store.get_session(request.session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session '{request.session_id}' not found.",
+            )
+
+        # Pre-generation turn validation
+        if request.turn_id is not None and not session.validate_turn(request.turn_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Turn {request.turn_id} is not active (current active turn: {session.active_turn_id}). LLM generation rejected.",
+            )
+
+    # Call LLM service
+    try:
+        result = await default_llm_service.generate(
+            messages=request.messages,
+            system_prompt=request.system_prompt,
+            temperature=request.temperature or 0.7,
+            max_tokens=request.max_tokens or 256,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except GroqLLMServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        )
+
+    # Post-generation turn validation (rejects stale response if turn changed in-flight)
+    if session and request.turn_id is not None:
+        if not session.validate_turn(request.turn_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Turn {request.turn_id} was superseded during LLM response generation. Generated response discarded.",
+            )
+
+    return LLMResponse(
+        session_id=request.session_id,
+        turn_id=request.turn_id,
+        text=result["text"],
+        provider=result["provider"],
+        model=result["model"],
+        prompt_tokens=result.get("prompt_tokens"),
+        completion_tokens=result.get("completion_tokens"),
+        latency_ms=result.get("latency_ms"),
+        status="SUCCESS",
+    )
+
 
 

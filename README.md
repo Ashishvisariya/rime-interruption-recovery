@@ -66,9 +66,15 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Client-side `MicrophoneRecorder` service capturing microphone input with `MediaRecorder` / `getUserMedia`.
   - Push-to-Talk (PTT) interactive UI button with real-time state feedback and prompt pre-fill.
   - 100% automated test pass rate across backend (39 tests) and frontend (10 tests).
-  - *Status:* **Phase 7 — Speech-to-text implemented; LLM and interruption pipeline pending.**
-- [ ] **Phase 8: Full Voice Pipeline (LLM -> Tools -> Full Duplex Recovery)** *(Planned)*
-- [ ] **Phase 9: Automated Interruption & Recovery Benchmarking** *(Planned)*
+- [x] **Phase 8: Groq LLM Integration** *(Completed)*
+  - Server-side `GroqLLMService` integrating Groq chat completions with active preview model `qwen/qwen3.6-27b` (Groq Preview model).
+  - Voice-optimized system prompt generating concise, speech-ready sentences without markdown clutter.
+  - Backend `POST /api/voice/respond` endpoint with session validation, pre-call turn gating, and critical post-completion stale turn rejection (HTTP 409 Conflict if barge-in advances the turn during generation).
+  - 100% automated test pass rate across backend (53 tests with 0 live API calls) and frontend (10 tests).
+  - Exactly ONE real Groq LLM integration verification call executed (`qwen/qwen3.6-27b`, single verification roundtrip latency: 1,269.66 ms; not a benchmark). Zero Gemini or Rime calls.
+  - *Status:* **Phase 8 — Groq LLM integrated with turn validation; interruption detection and full duplex recovery pending.**
+- [ ] **Phase 9: Full Voice Pipeline & Interruption Orchestration (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
+- [ ] **Phase 10: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
 ---
 

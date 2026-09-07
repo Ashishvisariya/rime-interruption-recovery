@@ -16,8 +16,8 @@ from backend.app.models.schemas import HealthResponse, RootStatusResponse
 
 app = FastAPI(
     title="Rime Voice AI Assistant with Interruption & Recovery",
-    description="DataForge 2026 Rime Hackathon - Phase 7 Speech-to-Text Integration",
-    version="0.5.0",
+    description="DataForge 2026 Rime Hackathon - Phase 8 Groq LLM Integration",
+    version="0.6.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -105,6 +105,6 @@ def root():
     return {
         "service": "Rime Voice AI Assistant",
         "status": "online",
-        "phase": 7,
+        "phase": 8,
         "rime_configured": settings.is_rime_configured,
     }

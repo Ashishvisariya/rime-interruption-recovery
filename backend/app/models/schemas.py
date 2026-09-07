@@ -17,8 +17,37 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 7
+    phase: int = 8
     rime_configured: bool = False
+
+
+class ChatMessage(BaseModel):
+    """Minimal conversational message representation."""
+    role: str = Field(..., description="Message author role (system, user, assistant)")
+    content: str = Field(..., description="Message text content")
+
+
+class LLMRequest(BaseModel):
+    """Payload for LLM response generation."""
+    session_id: Optional[str] = Field(default=None, description="Optional target session ID for turn gating")
+    turn_id: Optional[int] = Field(default=None, description="Optional associated turn ID")
+    messages: List[ChatMessage] = Field(..., min_length=1, description="List of conversational messages")
+    system_prompt: Optional[str] = Field(default=None, description="Optional custom system instruction")
+    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
+    max_tokens: Optional[int] = Field(default=256, ge=1, le=4096, description="Max tokens to generate")
+
+
+class LLMResponse(BaseModel):
+    """Structured response model for LLM generation."""
+    session_id: Optional[str] = Field(default=None, description="Associated session ID")
+    turn_id: Optional[int] = Field(default=None, description="Associated turn ID")
+    text: str = Field(..., description="Generated text response")
+    provider: str = Field(default="groq", description="LLM Provider name")
+    model: str = Field(..., description="LLM Model used")
+    prompt_tokens: Optional[int] = Field(default=None, description="Prompt token count if provided")
+    completion_tokens: Optional[int] = Field(default=None, description="Completion token count if provided")
+    latency_ms: Optional[float] = Field(default=None, description="Generation latency in milliseconds")
+    status: str = Field(default="SUCCESS", description="Outcome status")
 
 
 class TranscriptionResponse(BaseModel):

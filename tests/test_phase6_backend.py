@@ -21,12 +21,12 @@ def client():
 
 
 def test_root_endpoint_phase6(client):
-    """Verify root endpoint reports Phase 6."""
+    """Verify root endpoint reports online and valid phase."""
     res = client.get("/")
     assert res.status_code == 200
     data = res.json()
     assert data["service"] == "Rime Voice AI Assistant"
-    assert data["phase"] == 7
+    assert data["phase"] == 8
     assert data["status"] == "online"
 
 
