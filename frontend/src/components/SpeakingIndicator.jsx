@@ -1,8 +1,8 @@
 import React from 'react';
 import { PlaybackState } from '../services/audio.js';
 
-export default function SpeakingIndicator({ state, agentState, currentAudio }) {
-  const isPlaying = state === PlaybackState.PLAYING;
+export default function SpeakingIndicator({ state, agentState, currentAudio, interruptionInfo }) {
+  const isPlaying = state === PlaybackState.PLAYING || agentState === 'PLAYING';
   const isLoading = state === PlaybackState.LOADING || agentState === 'SYNTHESIZING';
   const isThinking = agentState === 'THINKING';
   const isTranscribing = agentState === 'TRANSCRIBING';
@@ -23,32 +23,39 @@ export default function SpeakingIndicator({ state, agentState, currentAudio }) {
   };
 
   const getStatusLabel = () => {
-    if (isInterrupting) return { text: 'Interruption Detected! Monotonic turn transitioning...', cls: 'interrupting' };
-    if (isListening) return { text: 'Listening to your voice...', cls: 'recording' };
-    if (isTranscribing) return { text: 'Transcribing speech via Groq Whisper...', cls: 'loading' };
-    if (isThinking) return { text: 'Reasoning & Generating response via Groq LLM (qwen/qwen3.6-27b)...', cls: 'thinking' };
-    if (isLoading) return { text: 'Synthesizing expressive speech via Rime Labs (coda/celeste)...', cls: 'loading' };
+    if (isInterrupting) {
+      return {
+        text: `Barge-In Interruption Detected! Turn #${interruptionInfo?.previousTurnId || ''} speech halted promptly (${interruptionInfo?.stopLatencyMs?.toFixed(2) || '< 0.2'} ms).`,
+        cls: 'interrupting',
+      };
+    }
+    if (isListening) return { text: 'Listening to your voice input...', cls: 'recording' };
+    if (isTranscribing) return { text: 'Transcribing speech via Groq Whisper (whisper-large-v3)...', cls: 'loading' };
+    if (isThinking) return { text: 'Generating response via Groq LLM (qwen/qwen3.6-27b)...', cls: 'thinking' };
+    if (isLoading) return { text: 'Synthesizing conversational voice via Rime Labs (coda / celeste)...', cls: 'loading' };
     if (isPlaying) {
       return {
-        text: `Speaking Turn #${currentAudio?.turnId} via Rime Labs (${currentAudio?.metadata?.speaker || 'celeste'})`,
+        text: `Speaking Turn #${currentAudio?.turnId || ''} via Rime Labs (${currentAudio?.metadata?.speaker || 'celeste'})`,
         cls: 'playing',
       };
     }
-    if (isStopped) return { text: 'Speech Halted (Immediate Interruption / Cutoff)', cls: 'stopped' };
-    if (agentState === 'ERROR' || state === PlaybackState.ERROR) return { text: 'Pipeline Error occurred', cls: 'error' };
-    return { text: 'Voice Agent Ready — Press Push-to-Talk or Speak to Barge-In', cls: 'idle' };
+    if (isStopped) return { text: 'Audio Playback Stopped (Buffer Purged)', cls: 'stopped' };
+    if (agentState === 'ERROR' || state === PlaybackState.ERROR) return { text: 'Pipeline Error encountered', cls: 'error' };
+    return { text: 'Voice Assistant Ready — Speak or click Talk to begin', cls: 'idle' };
   };
 
   const statusInfo = getStatusLabel();
 
   return (
-    <div className={`speaking-visualizer ${isPlaying ? 'active' : ''} ${isLoading || isThinking || isTranscribing ? 'loading' : ''} ${isListening ? 'listening' : ''}`}>
+    <div
+      className={`speaking-visualizer ${isPlaying ? 'active' : ''} ${isLoading || isThinking || isTranscribing ? 'loading' : ''} ${isListening ? 'listening' : ''} ${isInterrupting ? 'interrupting' : ''}`}
+    >
       <div className="visualizer-orb">
         <div className="wave-ring ring-1"></div>
         <div className="wave-ring ring-2"></div>
         <div className="wave-ring ring-3"></div>
         <div className="orb-core">
-          <span className={`orb-icon ${isLoading || isThinking ? 'spin' : isPlaying ? 'pulse' : ''}`}>
+          <span className={`orb-icon ${isLoading || isThinking ? 'spin' : isPlaying ? 'pulse' : isInterrupting ? 'flash' : ''}`}>
             {getOrbIcon()}
           </span>
         </div>
@@ -60,7 +67,7 @@ export default function SpeakingIndicator({ state, agentState, currentAudio }) {
             key={idx}
             className="bar"
             style={{
-              height: isPlaying ? `${height}%` : isListening ? `${height * 0.6}%` : '15%',
+              height: isPlaying ? `${height}%` : isListening ? `${height * 0.6}%` : isInterrupting ? '10%' : '15%',
               animationDelay: `${idx * 0.08}s`,
             }}
           />

@@ -16,8 +16,8 @@ export default function VoiceButton({
   isVADActive,
   activeTurnId,
 }) {
-  const isPlaying = state === PlaybackState.PLAYING;
-  const isAssistantBusy = isPlaying || agentState === 'THINKING' || agentState === 'SYNTHESIZING';
+  const isPlaying = state === PlaybackState.PLAYING || agentState === 'PLAYING';
+  const isAssistantBusy = isPlaying || agentState === 'THINKING' || agentState === 'SYNTHESIZING' || agentState === 'TRANSCRIBING';
 
   return (
     <div className="controls-panel glass-card">
@@ -27,14 +27,14 @@ export default function VoiceButton({
           className={`btn ${isRecording ? 'btn-danger pulse-recording' : 'btn-accent'}`}
           onClick={onToggleRecord}
           disabled={isLoading || isPlaying || isProcessing}
-          title={isRecording ? 'Click to finish recording and invoke Voice Agent' : 'Click to speak to Voice Agent via microphone'}
+          title={isRecording ? 'Click to finish recording and invoke Voice Agent' : 'Click to speak to Voice Agent via microphone (Push-to-Talk)'}
         >
           <span className="btn-icon">{isRecording ? '🔴' : isProcessing ? '⏳' : '🎤'}</span>
           <span>
             {isRecording
-              ? 'Recording... (Click to Finish & Send)'
+              ? 'Recording Voice... (Click to Finish)'
               : isProcessing
-              ? `Agent Processing (${agentState})...`
+              ? `Agent Active (${agentState})...`
               : 'Talk to Voice Agent (PTT)'}
           </span>
         </button>
@@ -47,14 +47,14 @@ export default function VoiceButton({
           title="Trigger speech barge-in interruption while assistant is active"
         >
           <span className="btn-icon">⚡</span>
-          <span>Barge-In / Interruption</span>
+          <span>Barge-In / Interrupt</span>
         </button>
 
         <button
           id="btn-toggle-vad"
           className={`btn ${isVADActive ? 'btn-success' : 'btn-secondary'}`}
           onClick={onToggleVAD}
-          title={isVADActive ? 'Continuous VAD active (listening for speech)' : 'Enable Continuous VAD for Hands-Free Barge-In'}
+          title={isVADActive ? 'Continuous VAD active (hands-free barge-in)' : 'Enable Continuous VAD for Hands-Free Barge-In'}
         >
           <span className="btn-icon">{isVADActive ? '🟢' : '⚪'}</span>
           <span>{isVADActive ? 'VAD Active (Listening)' : 'Enable Continuous VAD'}</span>
@@ -65,10 +65,10 @@ export default function VoiceButton({
           className="btn btn-primary"
           onClick={onProcessText}
           disabled={isLoading || isPlaying || isRecording || isProcessing}
-          title="Send text prompt to LLM and synthesize Rime speech"
+          title="Send prompt to LLM and synthesize Rime speech"
         >
           <span className="btn-icon">💬</span>
-          <span>{isLoading ? 'Thinking & Synthesizing...' : 'Send Prompt to Voice Agent'}</span>
+          <span>{isLoading ? 'Processing...' : 'Send Prompt to Voice Agent'}</span>
         </button>
 
         <button
@@ -76,10 +76,10 @@ export default function VoiceButton({
           className="btn btn-secondary"
           onClick={onAdvanceTurn}
           disabled={isLoading || isRecording || isProcessing}
-          title="Increment active turn sequence. Inactive/superseded older audio is instantly invalidated."
+          title="Advance turn sequence monotonically. Older pending audio is invalidated."
         >
           <span className="btn-icon">⏩</span>
-          <span>Advance to Turn #{activeTurnId + 1}</span>
+          <span>Advance Turn #{activeTurnId + 1}</span>
         </button>
 
         <button
