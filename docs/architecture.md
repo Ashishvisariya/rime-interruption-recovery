@@ -2,8 +2,8 @@
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Phase:** Phase 9 — Conversation / Session Manager  
-**Status:** CONVERSATION & SESSION MANAGER COMPLETE (Monotonic turn lifecycle, authoritative conversation history, and strict stale-result rejection verified across 78 backend tests)
+**Phase:** Phase 10 — End-to-End Voice Agent Orchestration  
+**Status:** END-TO-END VOICE AGENT ORCHESTRATION COMPLETE (Groq Whisper STT -> Conversation Session Manager -> Groq LLM -> Rime Labs TTS -> Browser Audio Playback verified with 90 automated tests and 1 genuine live E2E run)
 
 ---
 
@@ -325,18 +325,19 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 | Repository Path | Architectural Role | Phase Mapping |
 | :--- | :--- | :--- |
 | `backend/app/config.py` | Configuration & safe credential loading | Phase 1 & 8 (Complete) |
-| `backend/app/models/schemas.py` | Pydantic event, turn, STT, LLM, TTS, and conversation schemas | Phase 4, 5, 7, 8 & 9 (Complete) |
+| `backend/app/models/schemas.py` | Pydantic event, turn, STT, LLM, TTS, agent & conversation schemas | Phase 4, 5, 7, 8, 9 & 10 (Complete) |
 | `backend/app/core/session.py` | `VoiceSession` & `SessionStore` state manager | Phase 4 & 9 (Complete) |
 | `backend/app/services/rime_tts.py` | Rime Labs genuine TTS integration | Phase 5 (Complete) |
-| `backend/app/api/voice.py` | Voice session, STT, LLM, TTS & Context REST endpoints | Phase 4, 5, 7, 8 & 9 (Complete) |
+| `backend/app/api/voice.py` | Voice session, STT, LLM, TTS & Agent REST endpoints | Phase 4, 5, 7, 8, 9 & 10 (Complete) |
 | `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 7 (Complete) |
 | `backend/app/services/llm.py` | LLM text generation provider (Groq) | Phase 8 (Complete) |
 | `backend/app/services/conversation.py` | `ConversationManager` orchestrator service | Phase 9 (Complete) |
+| `backend/app/services/voice_agent.py` | `VoiceAgentOrchestrator` E2E pipeline service | Phase 10 (Complete) |
 | `frontend/src/services/recorder.js` | Push-to-talk microphone audio recording service | Phase 7 (Complete) |
-| `frontend/src/components/VoiceButton.jsx` | Push-to-talk microphone UI control | Phase 7 (Complete) |
-| `frontend/src/` | Lightweight voice client (Web Audio API & Playback Manager) | Phase 6 & 7 (Complete) |
-| `backend/app/core/cancellation.py` | `CancellationManager` & task cancellation hub | Phase 10 |
-| `tests/` | Unit, integration, and concurrency test suite | Phase 9 Complete: 78 backend tests |
+| `frontend/src/components/VoiceButton.jsx` | Push-to-talk microphone & Voice Agent UI control | Phase 7 & 10 (Complete) |
+| `frontend/src/` | Full Voice Assistant Client (Web Audio API & Playback Manager) | Phase 6, 7 & 10 (Complete) |
+| `backend/app/core/cancellation.py` | `CancellationManager` & Task Abort Hub | Phase 11–13 (Planned) |
+| `tests/` | Unit, integration, and voice orchestration test suite | Phase 10 Complete: 90 backend tests |
 
 ---
 

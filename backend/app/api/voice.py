@@ -1,13 +1,14 @@
 """Voice Session & Orchestration API Endpoints
 
 Provides REST gateway for voice session lifecycle management,
-turn state transitions, context retrieval, STT, LLM, and TTS dispatch.
-Full-duplex real-time streaming WebSockets will be wired in Phase 5+.
+turn state transitions, context retrieval, STT, LLM, TTS dispatch,
+and End-to-End Voice Agent Orchestration in Phase 10.
 """
 
 from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
+
 from backend.app.core.session import default_session_store
 from backend.app.models.schemas import (
     ConversationContextResponse,
@@ -15,13 +16,21 @@ from backend.app.models.schemas import (
     LLMResponse,
     RimeTTSRequest,
     TranscriptionResponse,
+    VoiceAgentResponse,
+    VoiceAgentTextRequest,
     VoiceSessionInfo,
 )
 from backend.app.services.rime_tts import default_rime_service, RimeTTSError
 from backend.app.services.stt import default_stt_service, STTError
 from backend.app.services.llm import default_llm_service, GroqLLMServiceError
+from backend.app.services.conversation import SessionNotFoundError, SessionClosedError, StaleTurnMutationError
+from backend.app.services.voice_agent import (
+    default_voice_agent,
+    VoiceAgentOrchestrationError,
+    VoiceAgentStaleTurnError,
+)
 
-router = APIRouter(prefix="/voice", tags=["Voice Sessions"])
+router = APIRouter(prefix="/voice", tags=["Voice Sessions & Agent Orchestration"])
 
 
 class CreateSessionRequest(BaseModel):
@@ -45,6 +54,10 @@ class CompleteTurnRequest(BaseModel):
     turn_id: int = Field(..., ge=1, description="Turn ID to complete")
     assistant_response: Optional[str] = Field(default=None, description="Final assistant response text to commit")
 
+
+# =====================================================================
+# 1. Session Lifecycle Endpoints
+# =====================================================================
 
 @router.post(
     "/session",
@@ -179,6 +192,10 @@ def complete_turn(session_id: str, request: CompleteTurnRequest) -> VoiceSession
         )
     return session.to_info()
 
+
+# =====================================================================
+# 2. Individual Component Endpoints (TTS, STT, LLM)
+# =====================================================================
 
 @router.post(
     "/tts",
@@ -383,3 +400,216 @@ async def respond_with_llm(request: LLMRequest) -> LLMResponse:
         latency_ms=result.get("latency_ms"),
         status="SUCCESS",
     )
+
+
+# =====================================================================
+# 3. End-to-End Voice Agent Orchestration Endpoints (Phase 10)
+# =====================================================================
+
+@router.post(
+    "/agent/process-audio",
+    summary="Process User Audio via End-to-End Voice Agent Pipeline",
+    description="Full voice interaction: STT -> Turn State -> LLM -> Rime TTS -> Spoken Audio Response.",
+    responses={
+        200: {
+            "content": {"audio/mpeg": {}, "audio/wav": {}},
+            "description": "Synthesized binary audio response from Rime Labs with turn metadata headers.",
+        },
+        400: {"description": "Invalid input or empty audio payload."},
+        404: {"description": "Session not found."},
+        409: {"description": "Turn superseded during processing. Result discarded."},
+        502: {"description": "Upstream STT, LLM, or TTS provider error."},
+    },
+)
+async def process_agent_audio(
+    file: UploadFile = File(..., description="Binary audio recording from browser mic"),
+    session_id: Optional[str] = Form(default=None, description="Optional target session ID"),
+    turn_id: Optional[int] = Form(default=None, description="Optional turn ID (advances monotonic turn if omitted)"),
+    language: Optional[str] = Form(default="en", description="Language code"),
+    system_prompt: Optional[str] = Form(default=None, description="Optional system instruction override"),
+    speaker: Optional[str] = Form(default=None, description="Optional Rime speaker override"),
+    model_id: Optional[str] = Form(default=None, description="Optional Rime model ID override"),
+    audio_format: Optional[str] = Form(default="mp3", description="Desired audio format"),
+) -> Response:
+    """Process user microphone speech audio through full voice agent pipeline."""
+    audio_bytes = await file.read()
+    if not audio_bytes or len(audio_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded audio recording cannot be empty.",
+        )
+
+    try:
+        result = await default_voice_agent.process_turn(
+            session_id=session_id,
+            turn_id=turn_id,
+            audio_bytes=audio_bytes,
+            audio_filename=file.filename or "recording.webm",
+            audio_mime_type=file.content_type or "audio/webm",
+            language=language or "en",
+            system_prompt=system_prompt,
+            speaker=speaker,
+            model_id=model_id,
+            audio_format=audio_format or "mp3",
+        )
+    except VoiceAgentStaleTurnError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+    except SessionNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except SessionClosedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except VoiceAgentOrchestrationError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=str(e),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    media_type = default_rime_service._resolve_accept_header(result.tts_metadata.audio_format)
+    headers = {
+        "X-Session-ID": result.session_id,
+        "X-Turn-ID": str(result.turn_id),
+        "X-User-Transcript": result.user_prompt,
+        "X-Assistant-Response": result.assistant_text,
+        "X-LLM-Provider": result.llm_metadata.get("provider", "groq"),
+        "X-LLM-Model": result.llm_metadata.get("model", "qwen/qwen3.6-27b"),
+        "X-Provider": result.tts_metadata.provider,
+        "X-Model-ID": result.tts_metadata.model_id,
+        "X-Speaker": result.tts_metadata.speaker,
+        "X-Audio-Format": result.tts_metadata.audio_format,
+        "X-Audio-Bytes-Length": str(len(result.audio_bytes)),
+        "X-Pipeline-Latency-Ms": str(result.latency_ms),
+    }
+
+    return Response(content=result.audio_bytes, media_type=media_type, headers=headers)
+
+
+@router.post(
+    "/agent/process-text",
+    summary="Process User Text via End-to-End Voice Agent Pipeline",
+    description="Text-driven voice interaction: Turn State -> LLM -> Rime TTS -> Spoken Audio Response.",
+    responses={
+        200: {
+            "content": {"audio/mpeg": {}, "audio/wav": {}},
+            "description": "Synthesized binary audio response from Rime Labs with turn metadata headers.",
+        },
+        400: {"description": "Invalid input or empty prompt."},
+        404: {"description": "Session not found."},
+        409: {"description": "Turn superseded during processing. Result discarded."},
+        502: {"description": "Upstream LLM or TTS provider error."},
+    },
+)
+async def process_agent_text(request: VoiceAgentTextRequest) -> Response:
+    """Process user text prompt through LLM and Rime TTS returning binary audio."""
+    try:
+        result = await default_voice_agent.process_turn(
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            text_prompt=request.text,
+            system_prompt=request.system_prompt,
+            speaker=request.speaker,
+            model_id=request.model_id,
+            audio_format=request.audio_format or "mp3",
+        )
+    except VoiceAgentStaleTurnError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+    except SessionNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except SessionClosedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except VoiceAgentOrchestrationError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=str(e),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    media_type = default_rime_service._resolve_accept_header(result.tts_metadata.audio_format)
+    headers = {
+        "X-Session-ID": result.session_id,
+        "X-Turn-ID": str(result.turn_id),
+        "X-User-Transcript": result.user_prompt,
+        "X-Assistant-Response": result.assistant_text,
+        "X-LLM-Provider": result.llm_metadata.get("provider", "groq"),
+        "X-LLM-Model": result.llm_metadata.get("model", "qwen/qwen3.6-27b"),
+        "X-Provider": result.tts_metadata.provider,
+        "X-Model-ID": result.tts_metadata.model_id,
+        "X-Speaker": result.tts_metadata.speaker,
+        "X-Audio-Format": result.tts_metadata.audio_format,
+        "X-Audio-Bytes-Length": str(len(result.audio_bytes)),
+        "X-Pipeline-Latency-Ms": str(result.latency_ms),
+    }
+
+    return Response(content=result.audio_bytes, media_type=media_type, headers=headers)
+
+
+@router.post(
+    "/agent/chat",
+    response_model=VoiceAgentResponse,
+    summary="Execute Voice Agent Pipeline (JSON Metadata Only)",
+    description="Executes voice agent pipeline and returns structured JSON metadata without binary audio stream.",
+)
+async def chat_voice_agent(request: VoiceAgentTextRequest) -> VoiceAgentResponse:
+    """Execute voice agent turn returning structured JSON metadata."""
+    try:
+        result = await default_voice_agent.process_turn(
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            text_prompt=request.text,
+            system_prompt=request.system_prompt,
+            speaker=request.speaker,
+            model_id=request.model_id,
+            audio_format=request.audio_format or "mp3",
+        )
+        return result.to_response()
+    except VoiceAgentStaleTurnError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+    except SessionNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except SessionClosedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except VoiceAgentOrchestrationError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=str(e),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )

@@ -16,8 +16,8 @@ from backend.app.models.schemas import HealthResponse, RootStatusResponse
 
 app = FastAPI(
     title="Rime Voice AI Assistant with Interruption & Recovery",
-    description="DataForge 2026 Rime Hackathon - Phase 9 Conversation / Session Manager",
-    version="0.7.0",
+    description="DataForge 2026 Rime Hackathon - Phase 10 End-to-End Voice Agent Orchestration",
+    version="0.8.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -32,11 +32,16 @@ app.add_middleware(
     expose_headers=[
         "X-Session-ID",
         "X-Turn-ID",
+        "X-User-Transcript",
+        "X-Assistant-Response",
+        "X-LLM-Provider",
+        "X-LLM-Model",
         "X-Provider",
         "X-Model-ID",
         "X-Speaker",
         "X-Audio-Format",
         "X-Audio-Bytes-Length",
+        "X-Pipeline-Latency-Ms",
     ],
 )
 
@@ -105,6 +110,6 @@ def root():
     return {
         "service": "Rime Voice AI Assistant",
         "status": "online",
-        "phase": 9,
+        "phase": 10,
         "rime_configured": settings.is_rime_configured,
     }

@@ -14,8 +14,8 @@ from backend.app.models.schemas import ChatMessage
 
 
 VOICE_SYSTEM_PROMPT = (
-    "You are a helpful, conversational voice assistant. "
-    "Speak naturally, clearly, and concisely in 1 to 2 sentences unless the user explicitly asks for more detail. "
+    "You are a concise voice assistant. "
+    "Give your answer directly in 1 to 2 short sentences without thought steps, reasoning process, or preamble. "
     "Do NOT use markdown formatting, bullet points, asterisks, hashtags, or emojis, as your response will be read aloud by text-to-speech."
 )
 
@@ -75,9 +75,13 @@ class GroqLLMService:
             payload_messages.append({"role": "system", "content": sys_prompt.strip()})
 
         for msg in messages:
-            if not msg.content or not msg.content.strip():
+            role = msg["role"] if isinstance(msg, dict) else getattr(msg, "role", "user")
+            content = msg["content"] if isinstance(msg, dict) else getattr(msg, "content", "")
+            if not content or not content.strip():
                 continue
-            payload_messages.append({"role": msg.role, "content": msg.content.strip()})
+            if role == "system" and sys_prompt and sys_prompt.strip() and payload_messages and payload_messages[0]["role"] == "system":
+                continue
+            payload_messages.append({"role": role, "content": content.strip()})
 
         if not payload_messages or (len(payload_messages) == 1 and payload_messages[0]["role"] == "system"):
             raise GroqLLMServiceError("Cannot generate response: no valid user/assistant message content provided.")

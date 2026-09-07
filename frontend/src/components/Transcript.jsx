@@ -1,11 +1,11 @@
 import React from 'react';
 
-export default function Transcript({ events, text, setText }) {
+export default function Transcript({ events, text, setText, conversationTurns = [] }) {
   return (
     <div className="transcript-panel glass-card">
       <div className="input-section">
         <label htmlFor="tts-text-input" className="input-label">
-          Spoken Text for Active Turn:
+          Active Turn Input / Prompt:
         </label>
         <div className="input-wrapper">
           <input
@@ -14,10 +14,37 @@ export default function Transcript({ events, text, setText }) {
             className="text-input"
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="Type text to synthesize with genuine Rime TTS..."
+            placeholder="Type prompt for Voice Agent or speak via microphone..."
           />
         </div>
       </div>
+
+      {conversationTurns && conversationTurns.length > 0 && (
+        <div className="conversation-section">
+          <div className="events-header">
+            <h3>Authoritative Conversation Turns</h3>
+            <span className="events-count">{conversationTurns.length} turns completed</span>
+          </div>
+          <div className="conversation-history">
+            {conversationTurns.map((turn, idx) => (
+              <div key={idx} className="conversation-turn-card">
+                <div className="turn-badge">Turn #{turn.turnId}</div>
+                <div className="turn-message user-msg">
+                  <span className="msg-role">User:</span>
+                  <span className="msg-content">{turn.userPrompt}</span>
+                </div>
+                <div className="turn-message assistant-msg">
+                  <span className="msg-role">Assistant (Rime {turn.speaker}):</span>
+                  <span className="msg-content">{turn.assistantResponse}</span>
+                </div>
+                {turn.latencyMs && (
+                  <div className="turn-meta mono">Latency: {turn.latencyMs}ms</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="events-section">
         <div className="events-header">

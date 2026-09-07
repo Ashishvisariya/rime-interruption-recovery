@@ -553,6 +553,78 @@ body {
   color: var(--accent-amber);
 }
 
+.conversation-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.conversation-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.conversation-turn-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.turn-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.turn-message {
+  display: flex;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.turn-message.user-msg .msg-role {
+  color: var(--accent-blue);
+  font-weight: 600;
+  min-width: 50px;
+}
+
+.turn-message.assistant-msg .msg-role {
+  color: var(--accent-emerald);
+  font-weight: 600;
+  min-width: 140px;
+}
+
+.msg-content {
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.turn-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  align-self: flex-end;
+}
+
+.status-label.thinking {
+  color: var(--accent-purple);
+  animation: pulse-glow 1.5s infinite;
+}
+
+.status-label.recording {
+  color: var(--accent-rose);
+  animation: pulse-glow 1s infinite;
+}
+
 .app-footer {
   text-align: center;
   font-size: 0.8rem;

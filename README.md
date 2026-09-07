@@ -79,8 +79,14 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Authoritative conversation history management with deterministic stale-result rejection (stale/superseded worker writes are rejected and never enter conversation history).
   - High-level `ConversationManager` orchestrator service for turn creation, interruption, completion, and LLM context formatting.
   - Concurrency-safe thread synchronization preventing race conditions between worker completions and user interruptions.
-  - 100% automated test pass rate across backend (78 tests with 0 live API calls) and frontend (10 tests).
-- [ ] **Phase 10: Full Voice Pipeline & Interruption Orchestration (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
+- [x] **Phase 10: End-to-End Voice Agent Orchestration** *(Completed)*
+  - Server-side `VoiceAgentOrchestrator` (`backend/app/services/voice_agent.py`) coordinating the full pipeline: Speech/Audio $\rightarrow$ Groq Whisper STT $\rightarrow$ Conversation State $\rightarrow$ Groq LLM $\rightarrow$ Turn Gating $\rightarrow$ Rime Labs TTS $\rightarrow$ Browser Playback.
+  - Multi-phase monotonic turn invariants enforcing state validity and discarding stale intermediate outputs across STT, LLM, and TTS boundaries.
+  - Backend orchestration endpoints: `POST /api/voice/agent/process-audio`, `POST /api/voice/agent/process-text`, and `POST /api/voice/agent/chat`.
+  - Frontend voice interface supporting 7 distinct agent states: `IDLE`, `LISTENING`, `TRANSCRIBING`, `THINKING`, `SYNTHESIZING`, `PLAYING`, and `ERROR`.
+  - 100% automated test pass rate across backend (90 tests with 0 live API calls) and frontend (10 tests).
+  - Exactly ONE genuine live end-to-end voice verification run successfully executed (STT $\rightarrow$ LLM $\rightarrow$ Rime TTS $\rightarrow$ `demo/live_agent_response.mp3`). Zero Gemini calls.
+- [ ] **Phase 11: Real-Time Interruption & Barge-In Detection** *(Planned)*
 
 ---
 

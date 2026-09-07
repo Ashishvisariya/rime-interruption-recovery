@@ -3,12 +3,13 @@ import { PlaybackState } from '../services/audio.js';
 
 export default function VoiceButton({
   state,
+  agentState,
   onAdvanceTurn,
-  onSynthesizeAndPlay,
+  onProcessText,
   onStop,
   onToggleRecord,
   isRecording,
-  isTranscribing,
+  isProcessing,
   isLoading,
   activeTurnId,
 }) {
@@ -21,39 +22,39 @@ export default function VoiceButton({
           id="btn-record-speech"
           className={`btn ${isRecording ? 'btn-danger pulse-recording' : 'btn-accent'}`}
           onClick={onToggleRecord}
-          disabled={isLoading || isPlaying || isTranscribing}
-          title={isRecording ? 'Click to stop recording and transcribe' : 'Click to record your voice via microphone'}
+          disabled={isLoading || isPlaying || isProcessing}
+          title={isRecording ? 'Click to finish recording and invoke Voice Agent' : 'Click to speak to Voice Agent via microphone'}
         >
-          <span className="btn-icon">{isRecording ? '🔴' : isTranscribing ? '⏳' : '🎤'}</span>
+          <span className="btn-icon">{isRecording ? '🔴' : isProcessing ? '⏳' : '🎤'}</span>
           <span>
             {isRecording
-              ? 'Recording... (Click to Finish)'
-              : isTranscribing
-              ? 'Transcribing Speech...'
-              : 'Record Voice (Mic PTT)'}
+              ? 'Recording... (Click to Finish & Send)'
+              : isProcessing
+              ? `Agent Processing (${agentState})...`
+              : 'Talk to Voice Agent (PTT)'}
           </span>
+        </button>
+
+        <button
+          id="btn-synthesize-play"
+          className="btn btn-primary"
+          onClick={onProcessText}
+          disabled={isLoading || isPlaying || isRecording || isProcessing}
+          title="Send text prompt to LLM and synthesize Rime speech"
+        >
+          <span className="btn-icon">💬</span>
+          <span>{isLoading ? 'Thinking & Synthesizing...' : 'Send Prompt to Voice Agent'}</span>
         </button>
 
         <button
           id="btn-advance-turn"
           className="btn btn-secondary"
           onClick={onAdvanceTurn}
-          disabled={isLoading || isRecording || isTranscribing}
+          disabled={isLoading || isRecording || isProcessing}
           title="Increment active turn sequence. Inactive/superseded older audio is instantly invalidated."
         >
           <span className="btn-icon">⚡</span>
           <span>Advance to Turn #{activeTurnId + 1}</span>
-        </button>
-
-        <button
-          id="btn-synthesize-play"
-          className="btn btn-primary"
-          onClick={onSynthesizeAndPlay}
-          disabled={isLoading || isPlaying || isRecording || isTranscribing}
-          title="Synthesize and play genuine Rime audio for active turn"
-        >
-          <span className="btn-icon">▶</span>
-          <span>{isLoading ? 'Synthesizing...' : 'Synthesize & Play Rime Audio'}</span>
         </button>
 
         <button

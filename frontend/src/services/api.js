@@ -1,5 +1,5 @@
 /**
- * Backend Voice API Client
+ * Backend Voice API Client (JavaScript)
  * 
  * Communicates exclusively with the server-side FastAPI backend.
  * Zero credentials or API keys are required or exposed in the client.
@@ -56,13 +56,6 @@ export class VoiceApiClient {
   /**
    * Request genuine Rime TTS synthesis from the backend for the given turn.
    * @param {Object} params
-   * @param {string} params.sessionId
-   * @param {number} params.turnId
-   * @param {string} params.text
-   * @param {string} [params.modelId]
-   * @param {string} [params.speaker]
-   * @param {string} [params.audioFormat]
-   * @param {string} [params.lang]
    * @returns {Promise<{ blob: Blob, headers: Object }>}
    */
   async synthesizeSpeech({ sessionId, turnId, text, modelId, speaker, audioFormat, lang }) {
@@ -106,11 +99,6 @@ export class VoiceApiClient {
   /**
    * Send speech audio to backend for Groq Whisper transcription.
    * @param {Object} params
-   * @param {Blob} params.audioBlob
-   * @param {string} [params.sessionId]
-   * @param {number} [params.turnId]
-   * @param {string} [params.language]
-   * @param {string} [params.model]
    * @returns {Promise<{ session_id: string, turn_id: number, text: string, provider: string, model: string, status: string }>}
    */
   async transcribeAudio({ audioBlob, sessionId = null, turnId = null, language = 'en', model = null }) {
@@ -137,7 +125,129 @@ export class VoiceApiClient {
 
     return res.json();
   }
+
+  /**
+   * Execute full End-to-End Voice Agent pipeline with microphone speech audio.
+   * STT -> Session -> LLM -> Rime TTS -> Spoken Audio
+   * @param {Object} params
+   * @param {Blob} params.audioBlob
+   * @param {string} [params.sessionId]
+   * @param {number} [params.turnId]
+   * @param {string} [params.language]
+   * @param {string} [params.systemPrompt]
+   * @param {string} [params.speaker]
+   * @param {string} [params.modelId]
+   * @param {string} [params.audioFormat]
+   * @returns {Promise<{ blob: Blob, headers: Object }>}
+   */
+  async processAgentAudio({
+    audioBlob,
+    sessionId = null,
+    turnId = null,
+    language = 'en',
+    systemPrompt = null,
+    speaker = null,
+    modelId = null,
+    audioFormat = 'mp3',
+  }) {
+    const formData = new FormData();
+    const filename = audioBlob.type.includes('mp4') ? 'recording.mp4' : audioBlob.type.includes('ogg') ? 'recording.ogg' : 'recording.webm';
+    formData.append('file', audioBlob, filename);
+
+    if (sessionId) formData.append('session_id', sessionId);
+    if (turnId !== null && turnId !== undefined) formData.append('turn_id', String(turnId));
+    if (language) formData.append('language', language);
+    if (systemPrompt) formData.append('system_prompt', systemPrompt);
+    if (speaker) formData.append('speaker', speaker);
+    if (modelId) formData.append('model_id', modelId);
+    if (audioFormat) formData.append('audio_format', audioFormat);
+
+    const res = await fetch(`${this.baseUrl}/voice/agent/process-audio`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({ error: res.statusText }));
+      const error = new Error(errData.error || `Voice agent processing failed (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
+
+    const blob = await res.blob();
+    const headers = {
+      sessionId: res.headers.get('X-Session-ID'),
+      turnId: parseInt(res.headers.get('X-Turn-ID') || String(turnId || 1), 10),
+      userTranscript: res.headers.get('X-User-Transcript') || '',
+      assistantResponse: res.headers.get('X-Assistant-Response') || '',
+      llmProvider: res.headers.get('X-LLM-Provider'),
+      llmModel: res.headers.get('X-LLM-Model'),
+      provider: res.headers.get('X-Provider'),
+      modelId: res.headers.get('X-Model-ID'),
+      speaker: res.headers.get('X-Speaker'),
+      audioFormat: res.headers.get('X-Audio-Format') || 'mp3',
+      audioBytesLength: parseInt(res.headers.get('X-Audio-Bytes-Length') || String(blob.size), 10),
+      latencyMs: parseFloat(res.headers.get('X-Pipeline-Latency-Ms') || '0'),
+    };
+
+    return { blob, headers };
+  }
+
+  /**
+   * Execute full End-to-End Voice Agent pipeline from text prompt.
+   * @param {Object} params
+   * @returns {Promise<{ blob: Blob, headers: Object }>}
+   */
+  async processAgentText({
+    text,
+    sessionId = null,
+    turnId = null,
+    systemPrompt = null,
+    speaker = null,
+    modelId = null,
+    audioFormat = 'mp3',
+  }) {
+    const payload = {
+      text,
+      session_id: sessionId,
+      turn_id: turnId,
+      system_prompt: systemPrompt,
+      speaker,
+      model_id: modelId,
+      audio_format: audioFormat,
+    };
+
+    const res = await fetch(`${this.baseUrl}/voice/agent/process-text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({ error: res.statusText }));
+      const error = new Error(errData.error || `Voice agent text processing failed (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
+
+    const blob = await res.blob();
+    const headers = {
+      sessionId: res.headers.get('X-Session-ID'),
+      turnId: parseInt(res.headers.get('X-Turn-ID') || String(turnId || 1), 10),
+      userTranscript: res.headers.get('X-User-Transcript') || text,
+      assistantResponse: res.headers.get('X-Assistant-Response') || '',
+      llmProvider: res.headers.get('X-LLM-Provider'),
+      llmModel: res.headers.get('X-LLM-Model'),
+      provider: res.headers.get('X-Provider'),
+      modelId: res.headers.get('X-Model-ID'),
+      speaker: res.headers.get('X-Speaker'),
+      audioFormat: res.headers.get('X-Audio-Format') || 'mp3',
+      audioBytesLength: parseInt(res.headers.get('X-Audio-Bytes-Length') || String(blob.size), 10),
+      latencyMs: parseFloat(res.headers.get('X-Pipeline-Latency-Ms') || '0'),
+    };
+
+    return { blob, headers };
+  }
 }
 
 export const defaultApiClient = new VoiceApiClient();
-

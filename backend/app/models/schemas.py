@@ -1,7 +1,7 @@
 """Typed Pydantic Data Models & Schemas
 
 Defines structured models for session management, turn tracking,
-event logging, conversation context, and API request/response payloads in accordance with Phase 9.
+event logging, conversation context, STT, LLM, TTS, and end-to-end voice agent orchestration payloads.
 """
 
 from enum import Enum
@@ -30,7 +30,7 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 9
+    phase: int = 10
     rime_configured: bool = False
 
 
@@ -136,6 +136,34 @@ class ConversationContextResponse(BaseModel):
     active_turn_id: int = Field(..., description="Currently active turn ID")
     is_active: bool = Field(default=True, description="Session active state")
     messages: List[ChatMessage] = Field(default_factory=list, description="Authoritative message history")
+
+
+class VoiceAgentTextRequest(BaseModel):
+    """Payload to trigger end-to-end voice agent processing from text."""
+    session_id: Optional[str] = Field(default=None, description="Target session ID (auto-created if omitted)")
+    turn_id: Optional[int] = Field(default=None, description="Optional turn ID (advances monotonic turn if omitted)")
+    text: str = Field(..., min_length=1, description="User prompt text")
+    system_prompt: Optional[str] = Field(default=None, description="Optional custom system instruction")
+    speaker: Optional[str] = Field(default=None, description="Optional Rime speaker override")
+    model_id: Optional[str] = Field(default=None, description="Optional Rime model ID override")
+    audio_format: Optional[str] = Field(default="mp3", description="Desired audio output format")
+
+
+class VoiceAgentResponse(BaseModel):
+    """Structured response metadata from end-to-end voice agent orchestration."""
+    session_id: str = Field(..., description="Associated session ID")
+    turn_id: int = Field(..., description="Associated monotonic turn ID")
+    user_prompt: str = Field(..., description="Transcribed or submitted user prompt")
+    assistant_text: str = Field(..., description="Generated assistant response text")
+    llm_provider: str = Field(default="groq", description="LLM provider name")
+    llm_model: str = Field(..., description="LLM model identifier")
+    tts_provider: str = Field(default="rime", description="TTS provider name")
+    tts_model: str = Field(..., description="Rime TTS model used")
+    tts_speaker: str = Field(..., description="Rime TTS speaker voice used")
+    audio_format: str = Field(default="mp3", description="Audio binary format")
+    audio_bytes_length: int = Field(..., ge=0, description="Size of synthesized audio in bytes")
+    latency_ms: Optional[float] = Field(default=None, description="Total pipeline latency in milliseconds")
+    status: str = Field(default="SUCCESS", description="Outcome status: SUCCESS, STALE_DISCARDED, or FAILED")
 
 
 class EventPayload(BaseModel):
