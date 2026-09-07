@@ -74,8 +74,32 @@ export default function App() {
     // 4. Subscribe to VAD real-time interruption events
     const unsubVAD = defaultVAD.onEvent(async (evt) => {
       if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
+        const t_detection = Date.now();
+
+        // 1. IMMEDIATELY stop active Rime audio playback and advance client turn
+        defaultPlaybackManager.stopCurrentAudio('interruption_barge_in');
+        defaultPlaybackManager.setActiveTurn(evt.newTurnId);
+
+        const t_stop = Date.now();
+        const stopLatencyMs = t_stop - t_detection;
+
+        // 2. Transition UI to INTERRUPTING
         setAgentState(AgentState.INTERRUPTING);
+
         setEvents((prev) => [
+          {
+            event_type: 'AUDIO_STOP_REQUESTED',
+            timestamp_ms: t_detection,
+            session_id: evt.sessionId,
+            turn_id: evt.previousTurnId,
+            state: playbackState,
+            details: {
+              previous_turn_id: evt.previousTurnId,
+              new_turn_id: evt.newTurnId,
+              reason: 'vad_barge_in',
+              stop_latency_ms: stopLatencyMs,
+            },
+          },
           {
             event_type: 'INTERRUPTION_DETECTED',
             timestamp_ms: evt.timestamp,
@@ -122,8 +146,12 @@ export default function App() {
             },
             ...prev.slice(0, 49),
           ]);
+
+          // Seamlessly transition UI to LISTENING for new user utterance
+          setAgentState(AgentState.LISTENING);
         } catch (err) {
           console.error('Failed to notify backend of interruption:', err);
+          setAgentState(AgentState.IDLE);
         }
       }
     });
@@ -353,20 +381,43 @@ export default function App() {
   // Handler: Manual Barge-In Trigger
   const handleBargeIn = async () => {
     if (!sessionId) return;
+    const t_detection = Date.now();
     const prevTurnId = activeTurnId;
     const prevAgentState = agentState;
+    const nextTurnId = prevTurnId + 1;
+
+    // Immediately stop active audio and advance client active turn
+    defaultPlaybackManager.stopCurrentAudio('manual_barge_in');
+    defaultPlaybackManager.setActiveTurn(nextTurnId);
+
+    const t_stop = Date.now();
+    const stopLatencyMs = t_stop - t_detection;
+
     setAgentState(AgentState.INTERRUPTING);
 
     setEvents((prev) => [
       {
-        event_type: 'INTERRUPTION_DETECTED',
-        timestamp_ms: Date.now(),
+        event_type: 'AUDIO_STOP_REQUESTED',
+        timestamp_ms: t_detection,
         session_id: sessionId,
         turn_id: prevTurnId,
         state: playbackState,
         details: {
           previous_turn_id: prevTurnId,
-          new_turn_id: prevTurnId + 1,
+          new_turn_id: nextTurnId,
+          reason: 'manual_barge_in',
+          stop_latency_ms: stopLatencyMs,
+        },
+      },
+      {
+        event_type: 'INTERRUPTION_DETECTED',
+        timestamp_ms: t_detection,
+        session_id: sessionId,
+        turn_id: prevTurnId,
+        state: playbackState,
+        details: {
+          previous_turn_id: prevTurnId,
+          new_turn_id: nextTurnId,
           detection_source: 'manual_barge_in',
           assistant_state: prevAgentState,
         },
@@ -402,8 +453,10 @@ export default function App() {
         },
         ...prev.slice(0, 49),
       ]);
+      setAgentState(AgentState.LISTENING);
     } catch (err) {
       console.error('Failed to trigger manual barge-in:', err);
+      setAgentState(AgentState.IDLE);
     }
   };
 

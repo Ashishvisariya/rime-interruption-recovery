@@ -63,6 +63,16 @@ export class AudioPlaybackManager {
     if (!this.audio || !this.audio.addEventListener) return;
 
     this.audio.addEventListener('play', () => {
+      // Race protection: Re-verify that currentAudio exists and matches active turn
+      if (!this.currentAudio || this.currentAudio.turnId < this.activeTurnId) {
+        try {
+          this.audio.pause();
+          this.audio.currentTime = 0;
+          this.audio.removeAttribute('src');
+        } catch (e) {}
+        return;
+      }
+
       if (this.state === PlaybackState.READY || this.state === PlaybackState.LOADING) {
         this._transitionTo(PlaybackState.PLAYING);
         this._emitEvent(AudioEventType.AUDIO_PLAY_STARTED, {
@@ -74,6 +84,12 @@ export class AudioPlaybackManager {
     });
 
     this.audio.addEventListener('ended', () => {
+      if (!this.currentAudio || this.currentAudio.turnId < this.activeTurnId) {
+        this.currentAudio = null;
+        this._transitionTo(PlaybackState.IDLE);
+        return;
+      }
+
       if (this.state === PlaybackState.PLAYING) {
         this._transitionTo(PlaybackState.COMPLETED);
         this._emitEvent(AudioEventType.AUDIO_PLAY_COMPLETED, {
@@ -105,10 +121,16 @@ export class AudioPlaybackManager {
 
   /**
    * Set active conversation session and current turn ID.
+   * If switching to a new session, halts existing playback from the previous session.
    * @param {string} sessionId 
    * @param {number} activeTurnId 
    */
   setSession(sessionId, activeTurnId = 0) {
+    if (this.activeSessionId && this.activeSessionId !== sessionId) {
+      if (this.state === PlaybackState.PLAYING || this.state === PlaybackState.LOADING || this.state === PlaybackState.READY) {
+        this.stopCurrentAudio('session_changed');
+      }
+    }
     this.activeSessionId = sessionId;
     this.setActiveTurn(activeTurnId);
   }
@@ -144,6 +166,11 @@ export class AudioPlaybackManager {
     const validQueue = [];
     for (const item of this.queue) {
       if (item.turnId < this.activeTurnId || (this.activeSessionId && item.sessionId !== this.activeSessionId)) {
+        if (item._createdBlobUrl && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+          try {
+            URL.revokeObjectURL(item._createdBlobUrl);
+          } catch (e) {}
+        }
         this._emitEvent(AudioEventType.AUDIO_DISCARDED, {
           sessionId: item.sessionId,
           turnId: item.turnId,
@@ -161,6 +188,11 @@ export class AudioPlaybackManager {
    */
   clearQueue() {
     for (const item of this.queue) {
+      if (item._createdBlobUrl && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+        try {
+          URL.revokeObjectURL(item._createdBlobUrl);
+        } catch (e) {}
+      }
       this._emitEvent(AudioEventType.AUDIO_DISCARDED, {
         sessionId: item.sessionId,
         turnId: item.turnId,
@@ -262,6 +294,17 @@ export class AudioPlaybackManager {
         if (playPromise !== undefined) {
           await playPromise;
         }
+
+        // Post-play promise turn and state re-validation
+        if (item.turnId < this.activeTurnId || this.state === PlaybackState.STOPPED || this.state === PlaybackState.STOPPING || this.state === PlaybackState.IDLE || this.currentAudio !== item) {
+          try {
+            this.audio.pause();
+            this.audio.currentTime = 0;
+            this.audio.removeAttribute('src');
+          } catch (e) {}
+          return false;
+        }
+
         if (this.state === PlaybackState.READY) {
           this._transitionTo(PlaybackState.PLAYING);
           this._emitEvent(AudioEventType.AUDIO_PLAY_STARTED, {

@@ -95,7 +95,15 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Frontend UI state: added `INTERRUPTING` state, visual feedback in `SpeakingIndicator` and `Status`, manual barge-in button, and continuous VAD mode.
   - 100% automated test pass rate: 96 backend tests passing and 22 frontend tests passing (0 live API calls).
   - *Scope Note:* Speech detection and monotonic turn transition are implemented. Physical Rime audio stopping (Phase 12) and LLM/tool task cancellation (Phase 13) are deliberately scheduled for upcoming phases.
-- [ ] **Phase 12: Immediate Rime Audio Output Cancellation** *(Planned)*
+- [x] **Phase 12: Immediate Rime Audio Output Cancellation** *(Completed)*
+  - Immediate audio hardware buffer cutoff (`this.audio.pause()`, `this.audio.currentTime = 0`, `removeAttribute('src')`, `audio.load()`) upon barge-in detection.
+  - Turn-aware audio validation (`AudioPlaybackManager` in `frontend/src/services/audio.js`): discards stale audio where `turnId < activeTurnId`.
+  - Playback queue purge: obsolete pending chunks from interrupted turns are discarded and associated Blob object URLs are revoked (`URL.revokeObjectURL`) to prevent memory leaks.
+  - Race condition immunity: post-`playPromise` re-validation prevents late resolution or spurious `play` events from restarting superseded audio.
+  - Deterministic UI transition: `PLAYING` $\rightarrow$ `INTERRUPTING` $\rightarrow$ `LISTENING` without stuck states or audio leakage.
+  - 100% automated test pass rate: 96 backend tests passing and 31 frontend tests passing (0 live API calls).
+  - *Scope Note:* Immediate Rime audio playback cancellation is complete. Background LLM/tool task cancellation is scheduled for **Phase 13**.
+- [ ] **Phase 13: LLM & Tool Task Cancellation Layer** *(Planned)*
 
 ---
 
