@@ -146,12 +146,27 @@ class GroqLLMService:
         message = choice.get("message", {})
         text = message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
 
-        # Clean out any thinking block tokens if returned
+        # Clean out any thinking block tokens or reasoning preambles if returned
         if "<think>" in text:
             if "</think>" in text:
                 text = text.split("</think>")[-1].strip()
             else:
                 text = text.replace("<think>", "").strip()
+
+        # Handle reasoning models outputting raw "Thinking Process:" headers
+        for prefix in ["thinking process:", "here's a thinking process:", "here is a thinking process:"]:
+            if prefix in text.lower():
+                paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+                # Select the last non-reasoning paragraph as the final spoken answer
+                candidates = [
+                    p for p in paragraphs
+                    if not p.lower().startswith(("thinking", "here's a thinking", "here is a thinking", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "*", "-"))
+                ]
+                if candidates:
+                    text = candidates[-1]
+                elif paragraphs:
+                    text = paragraphs[-1]
+                break
 
         if not text:
             raise GroqLLMServiceError("Groq LLM API returned empty content in message choice.")

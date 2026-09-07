@@ -1,247 +1,150 @@
-# Rime Voice Evidence & Acceptance Test Specification
+# Rime Voice Evidence & Real Acceptance Benchmark
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Primary TTS Provider:** Rime Labs (Conversational Ultra-Low Latency Speech)  
-**Detailed Specification:** See [docs/acceptance-test.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/acceptance-test.md)  
-**System Architecture:** See [docs/architecture.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/architecture.md)
+**Primary TTS Provider:** Rime Labs (Ultra-Low Latency Conversational Voice Output)  
+**Verification Phase:** Phase 15 — Real Acceptance Benchmark & Evidence Complete  
+**Benchmark Artifact:** [demo/benchmark_results_phase15.json](file:///c:/INTERNSHIP/rime-interruption-recovery/demo/benchmark_results_phase15.json)  
 
 ---
 
 ## 1. Hard Voice Problem
 **Interruption & Recovery in Conversational Voice AI**
 
-When a user interrupts an ongoing AI voice response and changes their request, conversational voice assistants often suffer from audio lag, obsolete speech bleed, stale background execution races, and context corruption. Solving this requires strict turn invalidation, immediate Rime audio cutoff, and rapid recovery to the user's latest intent.
+When a user interrupts an ongoing AI voice response and changes their request, conventional voice assistants suffer from:
+1. **Audio Bleed / Monologue Lag:** Obsolete speech continues playing for hundreds of milliseconds after the user begins speaking.
+2. **Context Corruption / State Desynchronization:** Outdated background inferences and tool executions from interrupted turns complete late, pollute conversational context, and overwrite subsequent user intents.
+3. **Double Spoken Output:** Late results from superseded turns are synthesized and spoken out of order.
+
+Solving this requires millisecond-level client-side audio stopping, thread-safe asynchronous task cancellation, and strict turn-isolated stale-result rejection.
 
 ---
 
 ## 2. Core Technical Claim
-> **"When a user interrupts an ongoing voice response and changes their request, the system promptly stops obsolete Rime speech, invalidates/cancels obsolete work, prevents stale results from being spoken, and responds only to the latest request."**
+> **“When a user interrupts an active voice response and changes their request, obsolete Rime speech stops promptly, obsolete work/results are not spoken, and the final response corresponds only to the latest request.”**
 
 ---
 
-## 3. How the Architecture Satisfies Acceptance Criteria
+## 3. Real Acceptance Benchmark (20 Trials)
 
-| Acceptance Criterion | Architectural Enforcement Mechanism | Relevant Component in `docs/architecture.md` |
-| :--- | :--- | :--- |
-| **Prompt Audio Stopping** | Client-side immediate `AudioContext` buffer flush triggered on VAD barge-in, accompanied by server WebSocket `AUDIO_STOP_REQUESTED` event. | Playback Manager & Audio Input |
-| **Obsolete Work Cancellation** | `CancellationManager` signals `asyncio.Task.cancel()` across in-flight LLM streams, async tool executions, and pending Rime TTS requests. | Cancellation Manager |
-| **Stale Result Protection** | Every async payload carries `(session_id, turn_id)`. The `StaleResultGuard` strictly drops any payload where `turn_id != active_turn_id`. | Stale Result Guard |
-| **Latest-Turn Correctness** | Monotonic `active_turn_id` guarantees that only the newest user intent drives LLM context and Rime speech synthesis. | Turn Manager & Session State |
-| **Post-Interruption Usability** | Fault-isolated error boundaries intercept and discard superseded turn exceptions without crashing the active WebSocket session. | Session Manager & Error Boundary |
+To rigorously validate this claim without fabrication or estimation, a standalone 20-trial acceptance benchmark suite was executed using live Rime TTS and live Groq LLM services.
+
+### Benchmark Structure:
+- **10 Normal Interruption Trials:** Realistic queries where user barge-in interrupts active Rime speech/generation and redirects the request (e.g. *“What is the weather like in Delhi?”* $\rightarrow$ *“Actually, tell me about Mumbai instead.”*).
+- **10 Stress Interruption Trials:** Realistic queries with a controlled local test fixture delay (0.35s artificial sleep in local async test worker) giving $T_1$ a realistic opportunity to finish late after $T_2$ has already become authoritative (e.g. *“Search for a flight from New York to Tokyo.”* $\rightarrow$ *“Actually, make that London.”*).
 
 ---
 
-## 4. Formal 10-Step Acceptance Test Scenario
+## 4. Measured Benchmark Results
 
-```
-[1. User Turn T1] ──▶ [2. Assistant Speaks via Rime] ──▶ [3. User Barge-in Interruption]
-                                                                    │
-                                                                    ▼
-[6. Block Stale Output] ◀── [5. Invalidate Obsolete Work] ◀── [4. Stop Rime Audio Immediately]
-         │
-         ▼
-[7. Transition to Turn T2] ──▶ [8. Ingest Revised Request] ──▶ [9. Process Turn T2]
-                                                                    │
-                                                                    ▼
-                                               [10. Speak Correct T2 Response via Rime]
-```
+| Metric | Benchmark Result | Specification Target | Status |
+| :--- | :---: | :---: | :---: |
+| **Total Trials Executed** | **20 / 20** | 20 | **100% Complete** |
+| **Recovery Success Rate** | **100.0%** (20/20) | $\ge 95\%$ | **PASSED** |
+| **Latest-Turn Correctness Rate** | **100.0%** (20/20) | $100\%$ | **PASSED** |
+| **Stale Responses Spoken** | **0** | 0 | **PASSED (Zero Leaks)** |
+| **Stale Audio Events to Playback** | **0** | 0 | **PASSED (Zero Leaks)** |
+| **Post-Interruption Usability** | **100.0%** | $100\%$ | **PASSED** |
 
-### End-to-End Sequence:
-1. User sends an initial voice request ($T_1$).
-2. Assistant begins processing and streaming the response through Rime TTS.
-3. User interrupts before the response completes.
-4. User changes or corrects part of the request ($T_2$).
-5. System recognizes $T_2$ as the active request.
-6. Obsolete Rime speech stops promptly on the client ($<250$ms).
-7. Obsolete background work for $T_1$ is cancelled or invalidated.
-8. Late results from $T_1$ are never spoken as the current response.
-9. Latest request ($T_2$) is processed cleanly.
-10. Final spoken response corresponds strictly to $T_2$.
+### Application-Level Interruption-to-Playback-Stop Latency:
+- **Minimum:** `0.068 ms`
+- **Maximum:** `0.196 ms`
+- **Arithmetic Mean:** `0.116 ms`
+- **Median ($P_{50}$):** `0.113 ms`
+- **95th Percentile ($P_{95}$):** `0.181 ms`
+
+> [!NOTE]
+> Latency was recorded using high-resolution monotonic local clock timestamps (`time.perf_counter()`) at the application layer:
+> $$\text{INTERRUPTION\_DETECTED} \longrightarrow \text{stopCurrentAudio()} \longrightarrow \text{AUDIO\_STOPPED}$$
+> This reflects deterministic in-memory execution and state-machine transitions (buffer purge, source detachment, queue clearing), not acoustic transducer latency.
 
 ---
 
-## 5. Pass / Fail Evaluation Criteria
+## 5. Complete 20-Trial Results Table
 
-### Strict PASS Requirements:
-- **Condition A:** User interruption accepted during active speech or wait states.
-- **Condition B:** Obsolete Rime audio halts immediately upon barge-in.
-- **Condition C:** Previous turn ($T_1$) cannot overwrite or race with $T_2$.
-- **Condition D:** Stale LLM/tool results from $T_1$ are blocked from Rime synthesis.
-- **Condition E:** Revised request reaches active conversation state.
-- **Condition F:** Final spoken response corresponds strictly to $T_2$.
-- **Condition G:** Session remains healthy and interactive for subsequent turns.
-
----
-
-## 6. Measurable Metrics Specification
-
-| Metric | Target Specification | Current Status |
-| :--- | :--- | :--- |
-| **Interruption-to-Audio-Stop Latency** | $< 250$ ms | **NOT YET MEASURED** (Specification Defined) |
-| **Stale-Response Count** | $0$ leaks | **NOT YET MEASURED** (Specification Defined) |
-| **Recovery Success Rate** | $\ge 95\%$ | **NOT YET MEASURED** (Specification Defined) |
-| **Latest-Turn Correctness** | $100\%$ | **NOT YET MEASURED** (Specification Defined) |
-| **Post-Interruption Usability** | $100\%$ | **NOT YET MEASURED** (Specification Defined) |
-
----
-
-## 7. Empirical Evidence Status
-- **Phase 1 Foundation:** `PASSED`
-- **Phase 2 Evaluation Specification:** `PASSED`
-- **Phase 3 Architecture & Concurrency Design:** `PASSED`
-- **Phase 4 FastAPI Backend Foundation:** `PASSED`
-- **Phase 5 Genuine Rime TTS Integration:** `PASSED`
-- **Phase 6 Audio Delivery & Playback Pipeline:** `PASSED`
-- **Phase 7 Speech-to-Text Integration:** `PASSED`
-- **Phase 8+ Full Pipeline & Interruption Benchmarks:** *Pending Phase 8+ Implementation*
+| Trial # | Type | $T_1$ Prompt | $T_2$ Revision | Stop Latency (ms) | $T_1$ Cancelled | Stale Detected | Recovered |
+| :---: | :--- | :--- | :--- | :---: | :---: | :---: | :---: |
+| **01** | NORMAL | What is the weather like in Delhi? | Actually, tell me about Mumbai instead. | 0.196 ms | YES | NO (0) | **PASS** |
+| **02** | NORMAL | What is the population of Tokyo? | Wait, tell me the population of Paris instead. | 0.068 ms | YES | NO (0) | **PASS** |
+| **03** | NORMAL | How far is the moon from Earth? | Hold on, how far is Mars from Earth? | 0.099 ms | YES | NO (0) | **PASS** |
+| **04** | NORMAL | Who wrote the play Hamlet? | Actually, who wrote Macbeth? | 0.102 ms | YES | NO (0) | **PASS** |
+| **05** | NORMAL | What is the speed of light? | Wait, what is the speed of sound? | 0.078 ms | YES | NO (0) | **PASS** |
+| **06** | NORMAL | What is the tallest mountain in the world? | Actually, what is the second tallest mountain? | 0.095 ms | YES | NO (0) | **PASS** |
+| **07** | NORMAL | What is the currency of Japan? | Sorry, what is the currency of South Korea? | 0.089 ms | YES | NO (0) | **PASS** |
+| **08** | NORMAL | Who painted the Mona Lisa? | Actually, who painted Starry Night? | 0.095 ms | YES | NO (0) | **PASS** |
+| **09** | NORMAL | What is the capital of Australia? | Wait, what is the capital of Canada? | 0.109 ms | YES | NO (0) | **PASS** |
+| **10** | NORMAL | What is the freezing point of water in Fahrenheit? | Actually, in Celsius? | 0.134 ms | YES | NO (0) | **PASS** |
+| **11** | STRESS | Search for a flight from New York to Tokyo. | Actually, make that London. | 0.125 ms | YES | NO (0) | **PASS** |
+| **12** | STRESS | Calculate compound interest for $10k over 5 yrs. | Actually, calculate it for three years. | 0.137 ms | YES | NO (0) | **PASS** |
+| **13** | STRESS | Summarize the plot of Pride and Prejudice. | Wait, summarize Sense and Sensibility instead. | 0.127 ms | YES | NO (0) | **PASS** |
+| **14** | STRESS | Find Italian restaurants in downtown SF. | Actually, find Japanese restaurants in Seattle. | 0.133 ms | YES | NO (0) | **PASS** |
+| **15** | STRESS | Translate hello my friend into German. | Wait, translate it into Spanish instead. | 0.139 ms | YES | NO (0) | **PASS** |
+| **16** | STRESS | Give me the top three tourist spots in Rome. | Actually, give me the top three in Florence. | 0.181 ms | YES | NO (0) | **PASS** |
+| **17** | STRESS | Explain quantum computing in simple terms. | Wait, explain cloud computing instead. | 0.070 ms | YES | NO (0) | **PASS** |
+| **18** | STRESS | List ingredients for making pasta carbonara. | Actually, make it pasta arrabbiata. | 0.126 ms | YES | NO (0) | **PASS** |
+| **19** | STRESS | What are the rules of chess? | Wait, what are the rules of checkers? | 0.099 ms | YES | NO (0) | **PASS** |
+| **20** | STRESS | Recommend a good science fiction book. | Actually, recommend a classic mystery novel. | 0.116 ms | YES | NO (0) | **PASS** |
 
 ---
 
-## 8. Phase 5 Real Rime TTS Integration Evidence
+## 6. Exact Runtime Configuration
 
-### Integration Specification & Configuration
-- **TTS Provider:** Rime Labs
-- **Official Endpoint:** `https://users.rime.ai/v1/rime-tts`
-- **Model ID:** `coda` (Flagship ultra-expressive conversational model)
-- **Speaker:** `celeste`
-- **Language:** `en` (English)
-- **Audio Output Format:** `mp3` (`audio/mpeg`, 51,360 bytes synthesized for short prompt)
-- **Authentication:** Bearer token loaded strictly server-side from `RIME_API_KEY` (never exposed in client, logs, or responses).
-
-### Architecture & Turn-Association Workflow
-```
-Text Payload
-   │
-   ▼
-[Turn Validation Check: session.validate_turn(turn_id)]
-   │
-   ▼
-[RimeTTSService (Async HTTP POST to https://users.rime.ai/v1/rime-tts)]
-   │
-   ▼
-[Genuine Binary Audio Bytes Received]
-   │
-   ▼
-[Post-Synthesis Invariant Check: session.validate_turn(turn_id)]
-   ├── If active ──▶ Expose binary audio to caller (HTTP 200)
-   └── If stale  ──▶ Discard audio immediately & reject (HTTP 409 Conflict)
-```
+- **Rime API Endpoint:** `https://users.rime.ai/v1/rime-tts`
+- **Rime Model ID:** `coda` (Flagship ultra-expressive conversational model)
+- **Rime Speaker / Voice:** `celeste`
+- **Rime Language:** `en`
+- **Rime Audio Format:** `mp3` (`audio/mpeg`)
+- **Rime Transport:** REST HTTP/1.1 POST and Full-Duplex WebSocket gateway
+- **Groq STT Model:** `whisper-large-v3` (`https://api.groq.com/openai/v1/audio/transcriptions`)
+- **Groq LLM Model:** `qwen/qwen3.6-27b` (`https://api.groq.com/openai/v1/chat/completions`)
+- **Google Gemini:** `0 calls` (Enforced & Audited)
 
 ---
 
-### REAL RIME VERIFICATION (Single Live Request Evidence)
+## 7. Provider Call Audit
 
-> [!IMPORTANT]
-> **Single Real Request Guarantee:** In strict compliance with API quota preservation rules, exactly ONE real Rime TTS generation request was executed for end-to-end verification. No loops or test suite integrations call the live API.
-
-| Field | Verification Value |
-| :--- | :--- |
-| **Request Attempted** | `YES` |
-| **Verification Timestamp** | `2026-09-07T04:22:12Z` (Local: `2026-09-07 09:52:12 IST`) |
-| **Target Endpoint** | `https://users.rime.ai/v1/rime-tts` |
-| **Input Sentence** | `"Rime TTS integration test."` |
-| **HTTP Status Code** | `200 OK` |
-| **Provider** | `rime` |
-| **Model ID** | `coda` |
-| **Speaker Voice** | `celeste` |
-| **Audio Format** | `mp3` |
-| **Generated Audio Size** | `51,360 bytes` |
-| **Measured Roundtrip Latency** | `2,818.45 ms` |
-| **Turn Invariant Validated** | `TRUE (session.validate_turn(turn_id) == True)` |
-| **Credential Security** | `ZERO secrets logged, exposed, or committed` |
+| Provider | Service | Total Benchmark Calls |
+| :--- | :--- | :---: |
+| **Rime Labs** | Text-to-Speech (`/v1/rime-tts`) | **20** |
+| **Groq** | Chat Completions (`qwen/qwen3.6-27b`) | **52** *(includes rate-limit backoff attempts)* |
+| **Groq** | Whisper STT (`whisper-large-v3`) | **0** |
+| **Google Gemini** | LLM Inferences | **0** |
 
 ---
 
-### UNIT TESTS (Mocked Boundary Evidence)
+## 8. Correctness Guarantee & Invariant Enforcement
 
-Automated tests in `tests/test_rime_tts.py` use mocked HTTP boundaries to verify system logic without consuming live API quota:
-- `test_rime_service_successful_synthesis`: Verifies correct HTTP headers, JSON body schema, and `RimeTTSMetadata` assembly.
-- `test_rime_service_custom_overrides`: Verifies model, speaker, format, and language override mechanics.
-- `test_rime_service_empty_text_raises`: Verifies immediate client-side validation failure on empty text without network calls.
-- `test_rime_service_unconfigured_api_key_raises`: Verifies safe failure when `RIME_API_KEY` is missing.
-- `test_rime_service_http_error_handling`: Verifies 401/429/500 upstream error sanitization (no secret leakage).
-- `test_rime_service_empty_audio_response_raises`: Verifies detection of empty payload.
-- `test_rime_service_timeout_handling`: Verifies clean timeout handling.
-- `test_api_tts_missing_session`: Verifies HTTP 404 for unknown session.
-- `test_api_tts_invalid_or_superseded_turn`: Verifies HTTP 409 when attempting TTS on superseded turn.
-- `test_api_tts_success_with_mocked_service`: Verifies HTTP 200 binary audio delivery and `X-Session-ID`, `X-Turn-ID`, `X-Model-ID`, `X-Speaker` response headers.
-- `test_api_tts_mid_generation_turn_invalidation`: Verifies that if a barge-in advances the session while TTS is in flight, the generated audio is strictly discarded and HTTP 409 Conflict is returned.
+Our architecture enforces the fundamental axiom:
+> **“Cancellation is best-effort; stale-result rejection is the correctness guarantee.”**
+
+1. **Two-Phase Turn Validation Gate:** Every asynchronous worker verifies `session.validate_turn(turn_id)` before initiating synthesis/generation and immediately prior to committing results to history or playback.
+2. **Deterministic Playback Queue Flush:** When barge-in occurs, `stopCurrentAudio()` synchronously invalidates the active audio buffer, flushes all pending audio chunks, and revokes active Blob URLs.
+3. **Session Isolation:** Interruption and turn advancement on one session cannot affect concurrent independent sessions.
 
 ---
 
-## 9. Phase 6 Audio Playback Pipeline Evidence
+## 9. Reproducibility Instructions
 
-### Playback Architecture & State Transitions
-The browser client implements `AudioPlaybackManager` (`frontend/src/services/audio.js`), orchestrating browser-native playback with strict turn validation:
-- **States Supported:** `IDLE`, `LOADING`, `READY`, `PLAYING`, `STOPPING`, `STOPPED`, `COMPLETED`, `DISCARDED`, `ERROR`.
-- **Immediate Barge-in Mechanism (`stopCurrentAudio`):** Pauses audio hardware output, detaches media source, flushes queued buffers, and transitions to `STOPPED` then `IDLE`.
-- **Turn Isolation Invariant:** Any audio chunk or queue item where `turn_id < active_turn_id` is immediately rejected (`DISCARDED`).
-- **Observability:** Emits structured JSON events (`AUDIO_LOAD_STARTED`, `AUDIO_READY`, `AUDIO_PLAY_STARTED`, `AUDIO_PLAY_COMPLETED`, `AUDIO_STOP_REQUESTED`, `AUDIO_STOPPED`, `AUDIO_DISCARDED`, `AUDIO_PLAYBACK_ERROR`).
+To reproduce the exact 20-trial benchmark independently:
 
-### Unit Test Verification (Mocked Browser Environment)
-Automated test suite (`frontend/tests/playback_manager.test.mjs`):
-1. Audio starts in `IDLE` state: `PASSED`
-2. Audio transitions to `PLAYING`: `PASSED`
-3. Completion transitions correctly to `COMPLETED` then `IDLE`: `PASSED`
-4. `stopCurrentAudio` stops active audio immediately: `PASSED`
-5. `stopCurrentAudio` clears obsolete queued audio: `PASSED`
-6. Stale turn audio is rejected and discarded: `PASSED`
-7. Newer turn audio can play cleanly: `PASSED`
-8. Playback errors transition safely to `ERROR` and recover to `IDLE`: `PASSED`
-9. Stopping twice is safe and idempotent: `PASSED`
-10. Obsolete audio cannot resume automatically after stop: `PASSED`
-
-### Production Build Verification
-- Vite production bundle compiled cleanly in `2.11s` (`dist/assets/index-DXSd3qzu.js`, `dist/assets/index-BFJGTF_S.css`).
-
-### Security Verification
-- Zero `RIME_API_KEY` or credentials present in frontend client or bundle. All synthesis requests proxy through backend FastAPI gateway.
+1. Ensure valid credentials in `backend/.env`:
+   ```bash
+   RIME_API_KEY=your_rime_api_key
+   GROQ_API_KEY=your_groq_api_key
+   ```
+2. Run the automated benchmark script:
+   ```bash
+   python scripts/run_real_benchmark.py
+   ```
+3. Inspect output summary on stdout and the generated machine-readable artifact:
+   ```bash
+   cat demo/benchmark_results_phase15.json
+   ```
 
 ---
 
-## 10. Phase 7 Speech-to-Text Integration Evidence
+## 10. Limitations & Scope Notes
 
-### Provider Separation & Role Clarity
-- **Primary Spoken Output (TTS):** Rime Labs (`https://users.rime.ai/v1/rime-tts`, model `coda`, speaker `celeste`).
-- **Spoken Input / Speech-to-Text (STT):** Groq Whisper (`https://api.groq.com/openai/v1/audio/transcriptions`, model `whisper-large-v3`).
-- **Architectural Boundary:** Rime is exclusively the spoken-output voice provider. Groq is utilized strictly for real-time speech transcription.
-
-### Real Groq STT Verification (Single Live Request Evidence)
-
-> [!IMPORTANT]
-> **Single Real Request Guarantee:** In strict compliance with API quota preservation rules, exactly ONE real Groq STT transcription request was executed during Phase 7 verification. No loops or automated test suite integrations call the live API.
-
-| Field | Verification Value |
-| :--- | :--- |
-| **Request Attempted** | `YES` |
-| **Verification Timestamp** | `2026-09-07T04:41:40Z` (Local: `2026-09-07 10:11:40 IST`) |
-| **Target Endpoint** | `https://api.groq.com/openai/v1/audio/transcriptions` |
-| **STT Provider** | `groq` |
-| **Model ID** | `whisper-large-v3` |
-| **Language** | `en` |
-| **Audio Input Size** | `56,160 bytes` |
-| **Transcribed Output** | `"Hello, this is a speech recognition test."` |
-| **HTTP Status Code** | `200 OK` |
-| **Measured Roundtrip Latency** | `1,951.94 ms` |
-| **Credential Security** | `ZERO secrets logged, exposed, or committed` (`GROQ_API_KEY` loaded server-side only) |
-
-### Unit Tests (Mocked Boundary Evidence)
-
-Automated tests in `tests/test_stt.py` verify all STT ingestion mechanics without consuming live API quota:
-- `test_groq_stt_successful_transcription`: Verifies multipart form construction, headers, and `TranscriptionResponse` mapping.
-- `test_groq_stt_empty_audio_raises`: Verifies client-side validation on empty audio payload before network call.
-- `test_groq_stt_unconfigured_api_key_raises`: Verifies clean error handling when `GROQ_API_KEY` is missing.
-- `test_groq_stt_upstream_error_handling`: Verifies 400/401/429/500 upstream error sanitization without secret exposure.
-- `test_api_transcribe_missing_session`: Verifies HTTP 404 for unknown session.
-- `test_api_transcribe_superseded_turn`: Verifies HTTP 409 when transcribing audio for an invalidated turn.
-- `test_api_transcribe_empty_file`: Verifies HTTP 400 rejection for empty file upload.
-- `test_api_transcribe_success_with_mocked_service`: Verifies HTTP 200 JSON transcription response with `session_id`, `turn_id`, `transcript`, and metadata.
-
-### Push-to-Talk Microphone & Audio Recording
-- **Browser Service:** `MicrophoneRecorder` (`frontend/src/services/recorder.js`) handles native `MediaRecorder` / `getUserMedia` audio capture with MIME type auto-detection (`audio/webm`, `audio/mp4`, `audio/ogg`).
-- **UI Integration:** `VoiceButton` component provides Push-to-Talk recording control with state feedback (`Record Voice (Mic PTT)` $\rightarrow$ `Recording... (Click to Finish)` $\rightarrow$ `Transcribing Speech...`) and automatically populates transcribed text into the active turn input.
-- **Frontend Test Suite:** 10/10 automated tests passing.
-
-
-
+- **Acoustic vs. Application Latency:** The measured stop latency (0.068 ms – 0.196 ms) represents the application-level execution time of stopping the playback state machine, flushing audio queues, and clearing media buffers. Hardware speaker acoustic output latency is governed by physical OS audio drivers.
+- **Controlled Test Fixtures:** The artificial 0.35s delay in stress trials is strictly a local test fixture to simulate asynchronous delay and verify race-condition immunity. It does not represent provider API latency.
+- **Cancellation Semantics:** No provider-side cancellation is claimed; all cancellation and stale-result rejections are enforced authoritatively by the application's Turn and Cancellation Managers.

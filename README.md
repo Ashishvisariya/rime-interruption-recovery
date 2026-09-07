@@ -116,7 +116,16 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Instant barge-in signaling: forwards VAD interruption cues over the socket, emits `AUDIO_STOP` to client, atomically advances turn sequence, and cancels obsolete in-flight tasks.
   - Browser WebSocket client (`VoiceWebSocketClient` in `frontend/src/services/websocket.js`) routing realtime streaming events directly to UI state and `AudioPlaybackManager`.
   - 100% automated test pass rate: 136 backend tests passing and 37 frontend tests passing (0 live API calls).
-- [ ] **Phase 15: Latency Measurement, Benchmarking & Final Polish** *(Planned)*
+- [x] **Phase 15: Real Acceptance Benchmark & Evidence** *(Completed)*
+  - Standalone 20-trial repeatable acceptance benchmark suite (`scripts/run_real_benchmark.py`) executed against genuine Rime Labs TTS (`coda` / `celeste` / `mp3`) and Groq LLM (`qwen/qwen3.6-27b`).
+  - Executed 10 Normal Interruption Trials and 10 Stress Interruption Trials (with controlled local asynchronous delay fixtures).
+  - **100.0% Recovery Success Rate** (20/20 trials recovered seamlessly).
+  - **100.0% Latest-Turn Correctness Rate** (20/20 trials responded strictly to the latest revision).
+  - **0 Stale Responses Spoken** and **0 Stale Audio Events Reaching Playback**.
+  - **Application-Level Interruption-to-Playback-Stop Latency:** Mean `0.116 ms`, Median `0.113 ms`, P95 `0.181 ms` (Min `0.068 ms`, Max `0.196 ms`).
+  - Strict zero Gemini calls (0). Provider calls audited: 20 Rime TTS calls, 52 Groq LLM calls (including rate-limit backoff retries).
+  - Complete structured results artifact published to `demo/benchmark_results_phase15.json` and documented in `docs/test-results.md` and `RIME_EVIDENCE.md`.
+  - Full regression test suites passing: 136 backend tests, 37 frontend tests, Vite production build clean.
 
 ---
 
