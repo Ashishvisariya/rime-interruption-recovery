@@ -2,8 +2,8 @@
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Phase:** Phase 8 — Groq LLM Integration  
-**Status:** GROQ LLM SERVICE & TWO-PHASE TURN VALIDATION COMPLETE (Interruption orchestration and full duplex recovery pending in Phase 9+)
+**Phase:** Phase 9 — Conversation / Session Manager  
+**Status:** CONVERSATION & SESSION MANAGER COMPLETE (Monotonic turn lifecycle, authoritative conversation history, and strict stale-result rejection verified across 78 backend tests)
 
 ---
 
@@ -325,18 +325,18 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 | Repository Path | Architectural Role | Phase Mapping |
 | :--- | :--- | :--- |
 | `backend/app/config.py` | Configuration & safe credential loading | Phase 1 & 8 (Complete) |
-| `backend/app/models/schemas.py` | Pydantic event, turn, STT, LLM, and TTS request/metadata models | Phase 4, 5, 7 & 8 (Complete) |
-| `backend/app/core/session.py` | `SessionManager` & active conversation state | Phase 4 (Complete) |
+| `backend/app/models/schemas.py` | Pydantic event, turn, STT, LLM, TTS, and conversation schemas | Phase 4, 5, 7, 8 & 9 (Complete) |
+| `backend/app/core/session.py` | `VoiceSession` & `SessionStore` state manager | Phase 4 & 9 (Complete) |
 | `backend/app/services/rime_tts.py` | Rime Labs genuine TTS integration | Phase 5 (Complete) |
-| `backend/app/api/voice.py` | Voice session, STT, LLM & TTS REST endpoints | Phase 4, 5, 7 & 8 (Complete) |
+| `backend/app/api/voice.py` | Voice session, STT, LLM, TTS & Context REST endpoints | Phase 4, 5, 7, 8 & 9 (Complete) |
 | `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 7 (Complete) |
 | `backend/app/services/llm.py` | LLM text generation provider (Groq) | Phase 8 (Complete) |
+| `backend/app/services/conversation.py` | `ConversationManager` orchestrator service | Phase 9 (Complete) |
 | `frontend/src/services/recorder.js` | Push-to-talk microphone audio recording service | Phase 7 (Complete) |
 | `frontend/src/components/VoiceButton.jsx` | Push-to-talk microphone UI control | Phase 7 (Complete) |
 | `frontend/src/` | Lightweight voice client (Web Audio API & Playback Manager) | Phase 6 & 7 (Complete) |
-| `backend/app/core/cancellation.py` | `CancellationManager` & `StaleResultGuard` | Phase 9 |
-| `backend/app/services/conversation.py` | Full duplex voice pipeline orchestrator | Phase 9 |
-| `tests/` | Unit, integration, and 20-trial evaluation suite | Ongoing (Phase 8 Complete: 53 tests) |
+| `backend/app/core/cancellation.py` | `CancellationManager` & task cancellation hub | Phase 10 |
+| `tests/` | Unit, integration, and concurrency test suite | Phase 9 Complete: 78 backend tests |
 
 ---
 

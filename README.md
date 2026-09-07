@@ -73,8 +73,14 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - 100% automated test pass rate across backend (53 tests with 0 live API calls) and frontend (10 tests).
   - Exactly ONE real Groq LLM integration verification call executed (`qwen/qwen3.6-27b`, single verification roundtrip latency: 1,269.66 ms; not a benchmark). Zero Gemini or Rime calls.
   - *Status:* **Phase 8 — Groq LLM integrated with turn validation; interruption detection and full duplex recovery pending.**
-- [ ] **Phase 9: Full Voice Pipeline & Interruption Orchestration (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
-- [ ] **Phase 10: Automated Interruption & Recovery Benchmarking** *(Planned)*
+- [x] **Phase 9: Conversation / Session Manager** *(Completed)*
+  - Robust in-memory `VoiceSession` and `SessionStore` with monotonic turn ID lifecycle (`CREATED` -> `ACTIVE` -> `COMPLETED` / `INTERRUPTED` / `CANCELLED` / `STALE` / `SUPERSEDED` / `FAILED`).
+  - Strict turn validation invariant: `validate_turn(turn_id) == True` strictly if `turn_id == active_turn_id` and turn is active.
+  - Authoritative conversation history management with deterministic stale-result rejection (stale/superseded worker writes are rejected and never enter conversation history).
+  - High-level `ConversationManager` orchestrator service for turn creation, interruption, completion, and LLM context formatting.
+  - Concurrency-safe thread synchronization preventing race conditions between worker completions and user interruptions.
+  - 100% automated test pass rate across backend (78 tests with 0 live API calls) and frontend (10 tests).
+- [ ] **Phase 10: Full Voice Pipeline & Interruption Orchestration (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
 
 ---
 

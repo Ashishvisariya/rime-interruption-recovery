@@ -1,19 +1,21 @@
 """Voice Session & Orchestration API Endpoints
 
-Provides REST gateway for voice session lifecycle management.
+Provides REST gateway for voice session lifecycle management,
+turn state transitions, context retrieval, STT, LLM, and TTS dispatch.
 Full-duplex real-time streaming WebSockets will be wired in Phase 5+.
 """
 
 from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from backend.app.core.session import default_session_store
 from backend.app.models.schemas import (
-    VoiceSessionInfo,
-    RimeTTSRequest,
-    TranscriptionResponse,
+    ConversationContextResponse,
     LLMRequest,
     LLMResponse,
+    RimeTTSRequest,
+    TranscriptionResponse,
+    VoiceSessionInfo,
 )
 from backend.app.services.rime_tts import default_rime_service, RimeTTSError
 from backend.app.services.stt import default_stt_service, STTError
@@ -30,6 +32,18 @@ class CreateSessionRequest(BaseModel):
 class CreateTurnRequest(BaseModel):
     """Payload to trigger turn progression."""
     prompt: Optional[str] = None
+
+
+class InterruptTurnRequest(BaseModel):
+    """Payload to signal turn interruption."""
+    turn_id: Optional[int] = Field(default=None, description="Optional turn ID to interrupt (defaults to active)")
+    reason: Optional[str] = Field(default="user_interruption", description="Reason for interruption")
+
+
+class CompleteTurnRequest(BaseModel):
+    """Payload to complete an active turn."""
+    turn_id: int = Field(..., ge=1, description="Turn ID to complete")
+    assistant_response: Optional[str] = Field(default=None, description="Final assistant response text to commit")
 
 
 @router.post(
@@ -61,6 +75,22 @@ def get_session(session_id: str) -> VoiceSessionInfo:
     return session.to_info()
 
 
+@router.delete(
+    "/session/{session_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete Voice Session",
+    description="Closes and removes an active voice conversation session.",
+)
+def delete_session(session_id: str):
+    deleted = default_session_store.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{session_id}' not found.",
+        )
+    return {"message": f"Session '{session_id}' deleted successfully."}
+
+
 @router.post(
     "/session/{session_id}/turn",
     response_model=VoiceSessionInfo,
@@ -74,8 +104,79 @@ def create_turn(session_id: str, request: Optional[CreateTurnRequest] = None) ->
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session '{session_id}' not found.",
         )
+    if not session.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Session '{session_id}' is closed.",
+        )
     prompt = request.prompt if request else None
     session.create_next_turn(prompt=prompt)
+    return session.to_info()
+
+
+@router.get(
+    "/session/{session_id}/context",
+    response_model=ConversationContextResponse,
+    summary="Get Conversation Context",
+    description="Retrieves authoritative conversational history formatted for LLM context.",
+)
+def get_conversation_context(session_id: str) -> ConversationContextResponse:
+    session = default_session_store.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{session_id}' not found.",
+        )
+    return ConversationContextResponse(
+        session_id=session.session_id,
+        active_turn_id=session.active_turn_id,
+        is_active=session.is_active,
+        messages=session.get_conversation_history(),
+    )
+
+
+@router.post(
+    "/session/{session_id}/interrupt",
+    response_model=VoiceSessionInfo,
+    summary="Interrupt Turn",
+    description="Marks the active turn as interrupted and superseded.",
+)
+def interrupt_turn(session_id: str, request: Optional[InterruptTurnRequest] = None) -> VoiceSessionInfo:
+    session = default_session_store.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{session_id}' not found.",
+        )
+    turn_id = request.turn_id if request and request.turn_id else session.active_turn_id
+    reason = request.reason if request else "user_interruption"
+    if turn_id > 0:
+        session.mark_turn_interrupted(turn_id=turn_id, reason=reason)
+    return session.to_info()
+
+
+@router.post(
+    "/session/{session_id}/complete",
+    response_model=VoiceSessionInfo,
+    summary="Complete Turn",
+    description="Marks an active turn as completed, appending optional assistant response to history.",
+)
+def complete_turn(session_id: str, request: CompleteTurnRequest) -> VoiceSessionInfo:
+    session = default_session_store.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{session_id}' not found.",
+        )
+    success = session.mark_turn_completed(
+        turn_id=request.turn_id,
+        assistant_response=request.assistant_response,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Turn {request.turn_id} is stale on session '{session_id}' (active: {session.active_turn_id}). Cannot complete turn.",
+        )
     return session.to_info()
 
 
@@ -268,6 +369,8 @@ async def respond_with_llm(request: LLMRequest) -> LLMResponse:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Turn {request.turn_id} was superseded during LLM response generation. Generated response discarded.",
             )
+        # Commit assistant response to authoritative conversation history
+        session.append_assistant_message(request.turn_id, result["text"])
 
     return LLMResponse(
         session_id=request.session_id,
@@ -280,6 +383,3 @@ async def respond_with_llm(request: LLMRequest) -> LLMResponse:
         latency_ms=result.get("latency_ms"),
         status="SUCCESS",
     )
-
-
-

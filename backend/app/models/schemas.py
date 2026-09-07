@@ -1,11 +1,24 @@
 """Typed Pydantic Data Models & Schemas
 
 Defines structured models for session management, turn tracking,
-event logging, and API request/response payloads in accordance with the Phase 3 architecture.
+event logging, conversation context, and API request/response payloads in accordance with Phase 9.
 """
 
+from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+
+
+class TurnStatus(str, Enum):
+    """Lifecycle states for a conversational turn."""
+    CREATED = "created"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+    STALE = "stale"
+    SUPERSEDED = "superseded"
+    FAILED = "failed"
 
 
 class HealthResponse(BaseModel):
@@ -17,14 +30,17 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 8
+    phase: int = 9
     rime_configured: bool = False
 
 
 class ChatMessage(BaseModel):
-    """Minimal conversational message representation."""
+    """Conversational message representation with optional turn attribution."""
     role: str = Field(..., description="Message author role (system, user, assistant)")
     content: str = Field(..., description="Message text content")
+    turn_id: Optional[int] = Field(default=None, description="Associated turn ID when created")
+    timestamp_ms: Optional[int] = Field(default=None, description="Timestamp in milliseconds")
+    status: Optional[str] = Field(default="active", description="Message status (active, stale, discarded)")
 
 
 class LLMRequest(BaseModel):
@@ -93,8 +109,13 @@ class VoiceTurn(BaseModel):
     """Represents a single conversational turn within a session."""
     turn_id: int = Field(..., ge=1, description="Monotonic turn ID")
     prompt: Optional[str] = Field(default=None, description="Transcribed user prompt for this turn")
-    status: str = Field(default="active", description="Turn status: active, completed, cancelled, or superseded")
+    status: str = Field(default="active", description="Turn status: created, active, completed, interrupted, cancelled, stale, superseded, or failed")
     created_at_ms: int = Field(..., description="Turn start timestamp in epoch milliseconds")
+    completed_at_ms: Optional[int] = Field(default=None, description="Turn completion timestamp in epoch milliseconds")
+    interrupted_at_ms: Optional[int] = Field(default=None, description="Turn interruption timestamp in epoch milliseconds")
+    assistant_response: Optional[str] = Field(default=None, description="Committed assistant response text")
+    error: Optional[str] = Field(default=None, description="Error message if turn failed")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Custom metadata for turn tracking")
 
 
 class VoiceSessionInfo(BaseModel):
@@ -103,6 +124,18 @@ class VoiceSessionInfo(BaseModel):
     active_turn_id: int = Field(..., ge=0, description="Currently active turn ID (0 if uninitiated)")
     is_active: bool = Field(default=True, description="Whether the session is active and accepting turns")
     turn_count: int = Field(default=0, description="Total turns initiated in this session")
+    message_count: int = Field(default=0, description="Total messages in session history")
+    status: str = Field(default="active", description="Lifecycle state of the session")
+    created_at_ms: Optional[int] = Field(default=None, description="Session creation timestamp in epoch milliseconds")
+    updated_at_ms: Optional[int] = Field(default=None, description="Session last updated timestamp in epoch milliseconds")
+
+
+class ConversationContextResponse(BaseModel):
+    """Structured response containing conversational history formatted for LLM context."""
+    session_id: str = Field(..., description="Associated session ID")
+    active_turn_id: int = Field(..., description="Currently active turn ID")
+    is_active: bool = Field(default=True, description="Session active state")
+    messages: List[ChatMessage] = Field(default_factory=list, description="Authoritative message history")
 
 
 class EventPayload(BaseModel):

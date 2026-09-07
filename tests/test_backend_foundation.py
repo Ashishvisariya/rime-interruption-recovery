@@ -34,7 +34,7 @@ def test_root_endpoint(client):
     data = response.json()
     assert data["service"] == "Rime Voice AI Assistant"
     assert data["status"] == "online"
-    assert data["phase"] == 8
+    assert data["phase"] == 9
     assert isinstance(data["rime_configured"], bool)
 
 
