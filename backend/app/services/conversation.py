@@ -8,6 +8,7 @@ Zero external API calls are executed in this service.
 
 from typing import Any, Dict, List, Optional
 from backend.app.core.session import SessionStore, VoiceSession, default_session_store
+from backend.app.core.cancellation import CancellationManager, default_cancellation_manager
 from backend.app.models.schemas import ChatMessage, VoiceSessionInfo, VoiceTurn
 
 
@@ -29,8 +30,15 @@ class StaleTurnMutationError(Exception):
 class ConversationManager:
     """Orchestrates conversation sessions, monotonic turns, and authoritative message histories."""
 
-    def __init__(self, session_store: Optional[SessionStore] = None):
+    def __init__(
+        self,
+        session_store: Optional[SessionStore] = None,
+        cancellation_manager: Optional[CancellationManager] = None,
+    ):
         self._store: SessionStore = session_store or default_session_store
+        self._cancellation: CancellationManager = (
+            cancellation_manager or default_cancellation_manager
+        )
 
     def create_session(self, session_id: Optional[str] = None) -> VoiceSession:
         """Create a new isolated session."""
@@ -47,14 +55,20 @@ class ConversationManager:
     def create_turn(self, session_id: str, prompt: Optional[str] = None) -> int:
         """Create a new monotonic active turn for the given session.
         
-        Automatically renders any previous active turn superseded/stale.
+        Automatically renders any previous active turn superseded/stale and cancels obsolete background tasks.
         """
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
         if not session.is_active:
             raise SessionClosedError(f"Session '{session_id}' is closed.")
-        return session.create_next_turn(prompt=prompt)
+        new_turn_id = session.create_next_turn(prompt=prompt)
+        self._cancellation.cancel_obsolete_tasks(
+            session_id=session_id,
+            active_turn_id=new_turn_id,
+            reason="turn_superseded",
+        )
+        return new_turn_id
 
     def get_active_turn(self, session_id: str) -> Optional[VoiceTurn]:
         """Retrieve the currently active turn for a session."""
@@ -136,7 +150,7 @@ class ConversationManager:
         turn_id: Optional[int] = None,
         reason: Optional[str] = "interrupted",
     ) -> bool:
-        """Interrupt a specific turn or the current active turn."""
+        """Interrupt a specific turn or the current active turn and cancel its in-flight tasks."""
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
@@ -144,7 +158,14 @@ class ConversationManager:
         target_turn_id = turn_id if turn_id is not None else session.active_turn_id
         if target_turn_id <= 0:
             return False
-        return session.mark_turn_interrupted(turn_id=target_turn_id, reason=reason)
+        success = session.mark_turn_interrupted(turn_id=target_turn_id, reason=reason)
+        if success:
+            self._cancellation.cancel_turn_tasks(
+                session_id=session_id,
+                turn_id=target_turn_id,
+                reason=reason or "interrupted",
+            )
+        return success
 
     def interrupt_and_advance_turn(
         self,
@@ -154,33 +175,55 @@ class ConversationManager:
         new_prompt: Optional[str] = None,
         assistant_state: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Atomically mark the active turn as interrupted and advance to the next monotonic turn."""
+        """Atomically mark the active turn as interrupted, advance to the next monotonic turn,
+        and cancel all obsolete in-flight asynchronous tasks.
+        """
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
         if not session.is_active:
             raise SessionClosedError(f"Session '{session_id}' is closed.")
 
-        return session.interrupt_and_advance(
+        result = session.interrupt_and_advance(
             reason=reason,
             detection_source=detection_source,
             new_prompt=new_prompt,
             assistant_state=assistant_state,
         )
+        self._cancellation.cancel_obsolete_tasks(
+            session_id=session_id,
+            active_turn_id=result["new_turn_id"],
+            reason=reason or "barge_in",
+        )
+        return result
 
     def cancel_turn(self, session_id: str, turn_id: int, reason: Optional[str] = None) -> bool:
-        """Cancel a turn."""
+        """Cancel a turn and all its in-flight tasks."""
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
-        return session.mark_turn_cancelled(turn_id=turn_id, reason=reason)
+        success = session.mark_turn_cancelled(turn_id=turn_id, reason=reason)
+        if success:
+            self._cancellation.cancel_turn_tasks(
+                session_id=session_id,
+                turn_id=turn_id,
+                reason=reason or "turn_cancelled",
+            )
+        return success
 
     def fail_turn(self, session_id: str, turn_id: int, error: str) -> bool:
-        """Mark a turn as failed."""
+        """Mark a turn as failed and cancel its tasks."""
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
-        return session.mark_turn_failed(turn_id=turn_id, error=error)
+        success = session.mark_turn_failed(turn_id=turn_id, error=error)
+        if success:
+            self._cancellation.cancel_turn_tasks(
+                session_id=session_id,
+                turn_id=turn_id,
+                reason=f"failed: {error}",
+            )
+        return success
 
     def get_llm_messages(
         self,
@@ -209,25 +252,29 @@ class ConversationManager:
         return session.to_info()
 
     def close_session(self, session_id: str) -> bool:
-        """Close session."""
+        """Close session and cancel all associated tasks."""
+        self._cancellation.cancel_all_session_tasks(session_id=session_id, reason="session_closed")
         return self._store.close_session(session_id)
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete session."""
+        """Delete session and cancel all associated tasks."""
+        self._cancellation.cancel_all_session_tasks(session_id=session_id, reason="session_deleted")
         return self._store.delete_session(session_id)
 
     def reset_session(self, session_id: str) -> bool:
-        """Reset session state."""
+        """Reset session state and cancel all associated tasks."""
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
+        self._cancellation.cancel_all_session_tasks(session_id=session_id, reason="session_reset")
         session.reset()
         return True
 
     def clear_all(self) -> None:
-        """Clear all sessions."""
+        """Clear all sessions and registered cancellation tasks."""
+        self._cancellation.clear()
         self._store.clear()
 
 
 # Default global conversation manager singleton
-default_conversation_manager = ConversationManager(default_session_store)
+default_conversation_manager = ConversationManager(default_session_store, default_cancellation_manager)

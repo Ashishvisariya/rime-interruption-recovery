@@ -12,10 +12,12 @@ Microphone Audio / User Prompt
 Preserves strict turn ownership and stale-result protection at every asynchronous transition.
 """
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
+from backend.app.core.cancellation import CancellationManager, default_cancellation_manager
 from backend.app.services.stt import GroqSTTService, default_stt_service, STTError
 from backend.app.services.llm import GroqLLMService, default_llm_service, GroqLLMServiceError
 from backend.app.services.rime_tts import RimeTTSService, default_rime_service, RimeTTSError
@@ -84,6 +86,7 @@ class VoiceAgentOrchestrator:
         stt_service: Optional[GroqSTTService] = None,
         llm_service: Optional[GroqLLMService] = None,
         rime_service: Optional[RimeTTSService] = None,
+        cancellation_manager: Optional[CancellationManager] = None,
     ):
         self.conversation_manager: ConversationManager = (
             conversation_manager or default_conversation_manager
@@ -91,6 +94,9 @@ class VoiceAgentOrchestrator:
         self.stt_service: GroqSTTService = stt_service or default_stt_service
         self.llm_service: GroqLLMService = llm_service or default_llm_service
         self.rime_service: RimeTTSService = rime_service or default_rime_service
+        self.cancellation_manager: CancellationManager = (
+            cancellation_manager or default_cancellation_manager
+        )
 
     async def process_turn(
         self,
@@ -130,8 +136,8 @@ class VoiceAgentOrchestrator:
             raise SessionClosedError(f"Session '{current_session_id}' is closed.")
 
         if turn_id is None:
-            # Advance monotonic turn
-            current_turn_id = session.create_next_turn(prompt=text_prompt)
+            # Advance monotonic turn (and cancel obsolete tasks)
+            current_turn_id = self.conversation_manager.create_turn(current_session_id, prompt=text_prompt)
         else:
             current_turn_id = turn_id
             if not session.validate_turn(current_turn_id):
@@ -141,127 +147,154 @@ class VoiceAgentOrchestrator:
                     turn_id=current_turn_id,
                 )
             if text_prompt:
-                session.append_user_message(current_turn_id, text_prompt)
+                if not any(m.turn_id == current_turn_id and m.role == "user" for m in session.messages):
+                    session.append_user_message(current_turn_id, text_prompt)
 
-        # Step 2: Speech-to-Text Transcription (if audio supplied)
-        user_prompt_text = text_prompt or ""
-        if audio_bytes and len(audio_bytes) > 0:
-            # Pre-STT Turn Validation
+        # Register current async task in cancellation manager under (session_id, turn_id)
+        current_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+
+        if current_task is not None:
+            self.cancellation_manager.register_task(
+                session_id=current_session_id,
+                turn_id=current_turn_id,
+                task=current_task,
+                task_type="agent_turn",
+            )
+
+        try:
+            # Step 2: Speech-to-Text Transcription (if audio supplied)
+            user_prompt_text = text_prompt or ""
+            if audio_bytes and len(audio_bytes) > 0:
+                # Pre-STT Turn Validation
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded before STT transcription.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+
+                try:
+                    stt_result = await self.stt_service.transcribe(
+                        audio_bytes=audio_bytes,
+                        filename=audio_filename,
+                        mime_type=audio_mime_type,
+                        language=language,
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+                    user_prompt_text = stt_result.text.strip()
+                except STTError as e:
+                    raise VoiceAgentOrchestrationError(f"STT Failure: {str(e)}", status_code=502)
+                except ValueError as e:
+                    raise VoiceAgentOrchestrationError(f"Invalid STT Input: {str(e)}", status_code=400)
+
+                # Post-STT Turn Validation & Commit User Prompt
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded during STT transcription.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+
+                # Update turn prompt & history if not already registered
+                turn = session.get_turn(current_turn_id)
+                if turn and not turn.prompt:
+                    turn.prompt = user_prompt_text
+                # If user message wasn't appended during turn creation, append now
+                if not any(m.turn_id == current_turn_id and m.role == "user" for m in session.messages):
+                    session.append_user_message(current_turn_id, user_prompt_text)
+
+            if not user_prompt_text.strip():
+                raise VoiceAgentOrchestrationError("User prompt is empty (speech was unparseable or text was blank).", status_code=400)
+
+            # Step 3: Pre-LLM Turn Validation
             if not session.validate_turn(current_turn_id):
                 raise VoiceAgentStaleTurnError(
-                    f"Turn {current_turn_id} superseded before STT transcription.",
+                    f"Turn {current_turn_id} superseded before LLM response generation.",
                     session_id=current_session_id,
                     turn_id=current_turn_id,
                 )
 
+            # Step 4: Extract LLM Conversation Context
+            llm_messages = session.get_context_for_llm(system_prompt=system_prompt)
+
+            # Step 5: Groq LLM Response Generation
             try:
-                stt_result = await self.stt_service.transcribe(
-                    audio_bytes=audio_bytes,
-                    filename=audio_filename,
-                    mime_type=audio_mime_type,
-                    language=language,
-                    session_id=current_session_id,
-                    turn_id=current_turn_id,
+                llm_result = await self.llm_service.generate(
+                    messages=llm_messages,
+                    system_prompt=system_prompt,
                 )
-                user_prompt_text = stt_result.text.strip()
-            except STTError as e:
-                raise VoiceAgentOrchestrationError(f"STT Failure: {str(e)}", status_code=502)
+                assistant_response_text = llm_result["text"].strip()
+            except GroqLLMServiceError as e:
+                raise VoiceAgentOrchestrationError(f"LLM Generation Failure: {str(e)}", status_code=502)
             except ValueError as e:
-                raise VoiceAgentOrchestrationError(f"Invalid STT Input: {str(e)}", status_code=400)
+                raise VoiceAgentOrchestrationError(f"Invalid LLM Request: {str(e)}", status_code=400)
 
-            # Post-STT Turn Validation & Commit User Prompt
+            # Step 6: Post-LLM / Pre-TTS Turn Validation
             if not session.validate_turn(current_turn_id):
                 raise VoiceAgentStaleTurnError(
-                    f"Turn {current_turn_id} superseded during STT transcription.",
+                    f"Turn {current_turn_id} superseded during LLM generation. Generated response discarded.",
                     session_id=current_session_id,
                     turn_id=current_turn_id,
                 )
 
-            # Update turn prompt & history if not already registered
-            turn = session.get_turn(current_turn_id)
-            if turn and not turn.prompt:
-                turn.prompt = user_prompt_text
-            # If user message wasn't appended during turn creation, append now
-            if not any(m.turn_id == current_turn_id and m.role == "user" for m in session.messages):
-                session.append_user_message(current_turn_id, user_prompt_text)
+            # Step 7: Rime TTS Voice Synthesis
+            try:
+                audio_bytes_out, tts_metadata = await self.rime_service.synthesize(
+                    text=assistant_response_text,
+                    session_id=current_session_id,
+                    turn_id=current_turn_id,
+                    speaker=speaker,
+                    model_id=model_id,
+                    audio_format=audio_format,
+                )
+            except RimeTTSError as e:
+                status_code = 502 if (e.status_code is None or e.status_code >= 500) else e.status_code
+                raise VoiceAgentOrchestrationError(f"Rime TTS Failure: {str(e)}", status_code=status_code)
+            except ValueError as e:
+                raise VoiceAgentOrchestrationError(f"Invalid TTS Input: {str(e)}", status_code=400)
 
-        if not user_prompt_text.strip():
-            raise VoiceAgentOrchestrationError("User prompt is empty (speech was unparseable or text was blank).", status_code=400)
+            # Step 8: Post-TTS Turn Validation (Barge-in / Stale Result Protection)
+            if not session.validate_turn(current_turn_id):
+                raise VoiceAgentStaleTurnError(
+                    f"Turn {current_turn_id} superseded during TTS synthesis. Generated audio discarded.",
+                    session_id=current_session_id,
+                    turn_id=current_turn_id,
+                )
 
-        # Step 3: Pre-LLM Turn Validation
-        if not session.validate_turn(current_turn_id):
-            raise VoiceAgentStaleTurnError(
-                f"Turn {current_turn_id} superseded before LLM response generation.",
+            # Step 9: Authoritative History Commitment
+            # Only the active turn commits its assistant response
+            session.mark_turn_completed(
+                turn_id=current_turn_id,
+                assistant_response=assistant_response_text,
+            )
+
+            total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+            return VoiceAgentExecutionResult(
                 session_id=current_session_id,
                 turn_id=current_turn_id,
+                user_prompt=user_prompt_text,
+                assistant_text=assistant_response_text,
+                audio_bytes=audio_bytes_out,
+                tts_metadata=tts_metadata,
+                llm_metadata=llm_result,
+                latency_ms=round(total_latency_ms, 2),
             )
-
-        # Step 4: Extract LLM Conversation Context
-        llm_messages = session.get_context_for_llm(system_prompt=system_prompt)
-
-        # Step 5: Groq LLM Response Generation
-        try:
-            llm_result = await self.llm_service.generate(
-                messages=llm_messages,
-                system_prompt=system_prompt,
-            )
-            assistant_response_text = llm_result["text"].strip()
-        except GroqLLMServiceError as e:
-            raise VoiceAgentOrchestrationError(f"LLM Generation Failure: {str(e)}", status_code=502)
-        except ValueError as e:
-            raise VoiceAgentOrchestrationError(f"Invalid LLM Request: {str(e)}", status_code=400)
-
-        # Step 6: Post-LLM / Pre-TTS Turn Validation
-        if not session.validate_turn(current_turn_id):
-            raise VoiceAgentStaleTurnError(
-                f"Turn {current_turn_id} superseded during LLM generation. Generated response discarded.",
-                session_id=current_session_id,
-                turn_id=current_turn_id,
-            )
-
-        # Step 7: Rime TTS Voice Synthesis
-        try:
-            audio_bytes_out, tts_metadata = await self.rime_service.synthesize(
-                text=assistant_response_text,
-                session_id=current_session_id,
-                turn_id=current_turn_id,
-                speaker=speaker,
-                model_id=model_id,
-                audio_format=audio_format,
-            )
-        except RimeTTSError as e:
-            status_code = 502 if (e.status_code is None or e.status_code >= 500) else e.status_code
-            raise VoiceAgentOrchestrationError(f"Rime TTS Failure: {str(e)}", status_code=status_code)
-        except ValueError as e:
-            raise VoiceAgentOrchestrationError(f"Invalid TTS Input: {str(e)}", status_code=400)
-
-        # Step 8: Post-TTS Turn Validation (Barge-in / Stale Result Protection)
-        if not session.validate_turn(current_turn_id):
-            raise VoiceAgentStaleTurnError(
-                f"Turn {current_turn_id} superseded during TTS synthesis. Generated audio discarded.",
-                session_id=current_session_id,
-                turn_id=current_turn_id,
-            )
-
-        # Step 9: Authoritative History Commitment
-        # Only the active turn commits its assistant response
-        session.mark_turn_completed(
-            turn_id=current_turn_id,
-            assistant_response=assistant_response_text,
-        )
-
-        total_latency_ms = (time.perf_counter() - start_time) * 1000.0
-
-        return VoiceAgentExecutionResult(
-            session_id=current_session_id,
-            turn_id=current_turn_id,
-            user_prompt=user_prompt_text,
-            assistant_text=assistant_response_text,
-            audio_bytes=audio_bytes_out,
-            tts_metadata=tts_metadata,
-            llm_metadata=llm_result,
-            latency_ms=round(total_latency_ms, 2),
-        )
+        except asyncio.CancelledError:
+            # Cancellation requested: do not mutate conversation history, clean up and re-raise
+            raise
+        finally:
+            if current_task is not None:
+                self.cancellation_manager.unregister_task(
+                    session_id=current_session_id,
+                    turn_id=current_turn_id,
+                    task_or_id=current_task,
+                )
 
 
 # Default global orchestrator singleton
@@ -270,4 +303,5 @@ default_voice_agent = VoiceAgentOrchestrator(
     stt_service=default_stt_service,
     llm_service=default_llm_service,
     rime_service=default_rime_service,
+    cancellation_manager=default_cancellation_manager,
 )

@@ -5,11 +5,13 @@ turn state transitions, context retrieval, STT, LLM, TTS dispatch,
 and End-to-End Voice Agent Orchestration in Phase 10.
 """
 
+import time
 from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from backend.app.core.session import default_session_store
+from backend.app.core.cancellation import default_cancellation_manager
 from backend.app.models.schemas import (
     ConversationContextResponse,
     InterruptionEventRequest,
@@ -97,6 +99,7 @@ def get_session(session_id: str) -> VoiceSessionInfo:
     description="Closes and removes an active voice conversation session.",
 )
 def delete_session(session_id: str):
+    default_cancellation_manager.cancel_all_session_tasks(session_id, reason="session_deleted")
     deleted = default_session_store.delete_session(session_id)
     if not deleted:
         raise HTTPException(
@@ -125,7 +128,12 @@ def create_turn(session_id: str, request: Optional[CreateTurnRequest] = None) ->
             detail=f"Session '{session_id}' is closed.",
         )
     prompt = request.prompt if request else None
-    session.create_next_turn(prompt=prompt)
+    new_turn_id = session.create_next_turn(prompt=prompt)
+    default_cancellation_manager.cancel_obsolete_tasks(
+        session_id=session_id,
+        active_turn_id=new_turn_id,
+        reason="turn_superseded",
+    )
     return session.to_info()
 
 
@@ -182,11 +190,21 @@ def interrupt_turn(session_id: str, request: Optional[InterruptionEventRequest] 
             new_prompt=new_prompt,
             assistant_state=assistant_state,
         )
+        default_cancellation_manager.cancel_obsolete_tasks(
+            session_id=session_id,
+            active_turn_id=result["new_turn_id"],
+            reason=reason,
+        )
         return InterruptionEventResponse(**result)
     else:
         target_turn_id = request.turn_id if (request and request.turn_id) else session.active_turn_id
         if target_turn_id > 0:
             session.mark_turn_interrupted(turn_id=target_turn_id, reason=reason)
+            default_cancellation_manager.cancel_turn_tasks(
+                session_id=session_id,
+                turn_id=target_turn_id,
+                reason=reason,
+            )
         return InterruptionEventResponse(
             session_id=session.session_id,
             previous_turn_id=target_turn_id,

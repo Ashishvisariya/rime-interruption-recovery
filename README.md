@@ -102,8 +102,14 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Race condition immunity: post-`playPromise` re-validation prevents late resolution or spurious `play` events from restarting superseded audio.
   - Deterministic UI transition: `PLAYING` $\rightarrow$ `INTERRUPTING` $\rightarrow$ `LISTENING` without stuck states or audio leakage.
   - 100% automated test pass rate: 96 backend tests passing and 31 frontend tests passing (0 live API calls).
-  - *Scope Note:* Immediate Rime audio playback cancellation is complete. Background LLM/tool task cancellation is scheduled for **Phase 13**.
-- [ ] **Phase 13: LLM & Tool Task Cancellation Layer** *(Planned)*
+- [x] **Phase 13: LLM & Background Task Cancellation Layer** *(Completed)*
+  - Thread-safe `CancellationManager` (`backend/app/core/cancellation.py`) maintaining task ownership indexed by `(session_id, turn_id)`.
+  - Automatic task registration for active turn pipelines (`agent_turn`, LLM inference, TTS synthesis).
+  - Immediate `asyncio.Task.cancel()` dispatch on obsolete tasks upon user interruption ($T_N \rightarrow T_{N+1}$) or turn advance without blocking the event loop.
+  - Clean `asyncio.CancelledError` propagation and resource teardown (releasing `httpx.AsyncClient` connections and unregistering tasks via auto `add_done_callback`).
+  - Strict preservation of the foundational invariant: *"Cancellation is best-effort; stale-result rejection is the correctness guarantee."* Stale turn outputs cannot mutate state or history.
+  - 100% automated test pass rate: 116 backend tests passing and 31 frontend tests passing (0 live API calls).
+- [ ] **Phase 14: Latency Measurement & Interruption Benchmarking** *(Planned)*
 
 ---
 

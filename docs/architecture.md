@@ -2,8 +2,8 @@
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Phase:** Phase 12 — Immediate Rime Audio Cancellation  
-**Status:** IMMEDIATE RIME AUDIO CANCELLATION COMPLETE (Immediate Audio Buffer Cutoff -> Stale Audio Discard -> Queue Purge & Object URL Revocation -> Race Condition Guard -> 96 Backend Tests & 31 Frontend Tests Passing with 0 Live API Calls)
+**Phase:** Phase 13 — LLM / Background Task Cancellation  
+**Status:** BACKGROUND TASK CANCELLATION COMPLETE (Active In-Flight Task Registry -> Immediate Asyncio Task Abort on Interruption -> Clean CancelledError Propagation -> Stale-Result Rejection Correctness Guarantee -> Multi-Session Isolation -> 116 Backend Tests & 31 Frontend Tests Passing with 0 Live API Calls)
 
 ---
 
@@ -328,21 +328,46 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 | `backend/app/models/schemas.py` | Pydantic event, turn, interruption, STT, LLM, TTS, agent & conversation schemas | Phase 4, 5, 7, 8, 9, 10 & 11 (Complete) |
 | `backend/app/core/session.py` | `VoiceSession` & `SessionStore` state manager | Phase 4, 9 & 11 (Complete) |
 | `backend/app/services/rime_tts.py` | Rime Labs genuine TTS integration | Phase 5 (Complete) |
-| `backend/app/api/voice.py` | Voice session, STT, LLM, TTS, Agent & Interruption REST endpoints | Phase 4, 5, 7, 8, 9, 10 & 11 (Complete) |
+| `backend/app/api/voice.py` | Voice session, STT, LLM, TTS, Agent, Interruption & Cancellation REST endpoints | Phase 4, 5, 7, 8, 9, 10, 11, 12 & 13 (Complete) |
 | `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 7 (Complete) |
 | `backend/app/services/llm.py` | LLM text generation provider (Groq) | Phase 8 (Complete) |
-| `backend/app/services/conversation.py` | `ConversationManager` orchestrator service | Phase 9 & 11 (Complete) |
-| `backend/app/services/voice_agent.py` | `VoiceAgentOrchestrator` E2E pipeline service | Phase 10 (Complete) |
+| `backend/app/services/conversation.py` | `ConversationManager` orchestrator service | Phase 9, 11 & 13 (Complete) |
+| `backend/app/services/voice_agent.py` | `VoiceAgentOrchestrator` E2E pipeline service with task registration & cancellation | Phase 10 & 13 (Complete) |
 | `frontend/src/services/vad.js` | Browser-native Voice Activity Detection & Interruption Detector | Phase 11 (Complete) |
 | `frontend/src/services/recorder.js` | Push-to-talk microphone audio recording service | Phase 7 (Complete) |
 | `frontend/src/components/VoiceButton.jsx` | Push-to-talk microphone, Barge-in trigger & VAD UI controls | Phase 7, 10 & 11 (Complete) |
 | `frontend/src/` | Full Voice Assistant Client (Web Audio API, VAD & Playback Manager) | Phase 6, 7, 10, 11 & 12 (Complete) |
-| `backend/app/core/cancellation.py` | `CancellationManager` & Task Abort Hub | Phase 13 (Planned) |
-| `tests/` | Unit, integration, interruption, and voice orchestration test suite | Phase 12 Complete: 96 backend tests, 31 frontend tests |
+| `backend/app/core/cancellation.py` | `CancellationManager` & Task Abort Hub indexed by `(session_id, turn_id)` | Phase 13 (Complete) |
+| `tests/` | Unit, integration, interruption, cancellation, and voice orchestration test suite | Phase 13 Complete: 116 backend tests, 31 frontend tests |
 
 ---
 
-## 13. Architectural Decisions & Known Limitations
+## 13. Phase 13: Background Task Cancellation Mechanics
+
+### Core Invariant:
+> **"Cancellation is best-effort; stale-result rejection is the correctness guarantee."**
+
+### Task Ownership:
+Every asynchronous, turn-bound operation is registered with `CancellationManager` under ownership tuple:
+```python
+(session_id: str, turn_id: int) -> TrackedTask(task_id, task_type, task, created_at_ms, is_cancelled)
+```
+
+### Lifecycle & Cancellation Progression:
+1. **Task Registration:** When an async turn worker begins (`agent_turn`, `llm`, `tts`), it registers `asyncio.current_task()` with `cancellation_manager.register_task(...)`.
+2. **Interruption Trigger:** When a user barge-in occurs or a new turn is created ($T_N \rightarrow T_{N+1}$), `interrupt_and_advance_turn()` executes `cancellation_manager.cancel_obsolete_tasks(session_id, active_turn_id=N+1)`.
+3. **Asyncio Cancellation Propagation:** In-flight tasks belonging to $T_N$ receive `task.cancel()`, causing pending `await httpx.AsyncClient` calls to raise `asyncio.CancelledError`.
+4. **Clean Resource Teardown:** Open HTTP client connections and temporary resources are immediately closed in `finally:` blocks without swallowing errors or corrupting session history.
+5. **Stale Validation Fallback:** If a provider request finishes right as cancellation arrives, downstream state commit gates check `session.validate_turn(turn_id)`. Because $T_N$ is superseded, the stale result is dropped and $T_{N+1}$ remains authoritative.
+6. **Task Unregistration:** Automatic `task.add_done_callback()` purges completed/cancelled tasks from memory, preventing memory leaks.
+
+### Provider Cancellation Limitations:
+- **Local Task Cancellation:** Closes the local client socket/HTTP stream immediately, saving local CPU and event loop resources.
+- **Remote Provider Handling:** We do NOT claim that remote server-side generation (on Groq or Rime GPUs) is terminated after disconnect unless explicit provider protocol guarantees exist. The local client connection is safely severed.
+
+---
+
+## 14. Architectural Decisions & Known Limitations
 
 ### Recorded Architectural Decisions:
 - **Decision 1 (Monotonic Turn ID):** Use a single integer `active_turn_id` per session to eliminate ambiguity.
@@ -353,7 +378,9 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 - **Decision 6 (Rime Primary TTS):** Rime Labs is the primary spoken output provider.
 - **Decision 7 (Server-Side Isolation):** All credentials and AI provider SDKs remain backend-contained.
 - **Decision 8 (Simplicity & Reproducibility):** Direct monolithic FastAPI backend with async primitives rather than complex distributed broker infrastructure.
+- **Decision 9 (Asyncio Task Ownership):** Track in-flight tasks indexed by `(session_id, turn_id)` in `CancellationManager` with automatic cleanup callbacks.
 
 ### Known Limitations:
-- Network jitter between client and server may introduce minor variance in the client's audio-stop latency metric (mitigated by client-side immediate muting).
-- Extremely rapid multi-barge-in (<100ms apart) will result in multiple rapid turn increments; handled safely by monotonic ordering.
+- Remote LLM/TTS provider servers may continue token generation internally after client disconnects; client-side disconnection and stale result rejection guarantee zero application state corruption.
+- Rapid multi-barge-in (<100ms apart) will result in multiple rapid turn increments; handled safely by monotonic ordering and obsolete task cancellation.
+
