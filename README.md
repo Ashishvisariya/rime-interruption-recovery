@@ -59,36 +59,36 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
 - [x] **Phase 3: System Architecture & Concurrency Design** *(Completed)*
 - [x] **Phase 4: FastAPI Backend Foundation** *(Completed)*
 - [x] **Phase 5: Real Rime TTS Integration** *(Completed)*
-  - Direct integration with genuine Rime Labs TTS API (`https://users.rime.ai/v1/rime-tts`).
-  - Flagship `coda` model and `celeste` speaker voice with MP3/WAV audio output.
-  - Safe credential loading from `RIME_API_KEY` with zero client exposure.
-  - Two-phase monotonic turn validation (pre-dispatch and post-return) discarding obsolete speech.
-  - Dedicated REST endpoint `POST /api/voice/tts` with binary audio response and turn metadata headers.
-  - 100% automated test suite pass rate with mocked HTTP boundaries (zero quota drain).
-  - Verified with single real live synthesis request.
-  - *Status:* **Phase 5 — Real Rime TTS integration implemented; interruption pipeline pending.**
-- [ ] **Phase 6: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
-- [ ] **Phase 7: Automated Interruption & Recovery Benchmarking** *(Planned)*
+- [x] **Phase 6: Rime Audio Delivery & Playback Pipeline** *(Completed)*
+  - Client-side `AudioPlaybackManager` with 9-state deterministic machine (`IDLE` $\rightarrow$ `LOADING` $\rightarrow$ `READY` $\rightarrow$ `PLAYING` $\rightarrow$ `COMPLETED` / `STOPPED` / `DISCARDED`).
+  - Monotonic turn isolation rejecting stale audio from older turns ($T_{audio} < T_{active}$).
+  - Immediate audio stop & buffer flush mechanism (`stopCurrentAudio`) for barge-in interruptions.
+  - Interactive React web application with speaking visualizer orb, turn sequence manager, and live event audit stream.
+  - 100% automated test pass rate across backend (31 tests) and frontend playback manager (10 tests).
+  - *Status:* **Phase 6 — Rime audio playback pipeline implemented; interruption detection and recovery pending.**
+- [ ] **Phase 7: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
+- [ ] **Phase 8: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
 ---
 
-## 8. Backend Foundation & Getting Started
+## 8. Getting Started & Running Locally
 
 ### Prerequisites
 - Python 3.10+
+- Node.js 18+ and npm
 - Valid API keys (`RIME_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`)
 
-### Setup & Run
+### Backend Setup & Run
 1. Configure environment template:
    ```bash
    cp backend/.env.example backend/.env
    # Edit backend/.env with your API credentials (kept server-side & git-ignored)
    ```
-2. Install dependencies:
+2. Install Python dependencies:
    ```bash
    pip install -r backend/requirements.txt
    ```
-3. Run automated test suite (mocked HTTP layer, 0 API quota used):
+3. Run automated backend test suite (0 external API calls):
    ```bash
    python -m pytest tests/ -v
    ```
@@ -101,22 +101,22 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
    curl http://127.0.0.1:8000/health
    # Returns: {"status": "ok"}
    ```
-6. Test Rime TTS endpoint:
+
+### Frontend Setup & Run
+1. Install dependencies & run frontend tests:
    ```bash
-   # 1. Initialize a session
-   curl -X POST http://127.0.0.1:8000/api/voice/session \
-     -H "Content-Type: application/json" \
-     -d '{"session_id": "test_sess"}'
-
-   # 2. Advance to Turn 1
-   curl -X POST http://127.0.0.1:8000/api/voice/session/test_sess/turn \
-     -H "Content-Type: application/json" \
-     -d '{"prompt": "Hello"}'
-
-   # 3. Synthesize speech for Turn 1 (returns binary audio/mpeg)
-   curl -X POST http://127.0.0.1:8000/api/voice/tts \
-     -H "Content-Type: application/json" \
-     -d '{"session_id": "test_sess", "turn_id": 1, "text": "Hello, this is Rime speech."}' \
-     --output speech.mp3
+   cd frontend
+   npm install
+   npm test
    ```
+2. Start Vite development server:
+   ```bash
+   npm run dev
+   ```
+3. Open browser at `http://localhost:5173`.
+4. Interact with the voice assistant:
+   - **Advance Turn:** Atomically advances monotonic turn $N \rightarrow N+1$.
+   - **Synthesize & Play Rime Audio:** Fetches genuine Rime audio from `/api/voice/tts` and streams via `AudioPlaybackManager`.
+   - **Stop / Interrupt Speech:** Immediately halts active audio output, detaches media stream, and logs the interruption event.
+
 

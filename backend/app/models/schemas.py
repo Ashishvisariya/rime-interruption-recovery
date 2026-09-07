@@ -17,7 +17,7 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 5
+    phase: int = 6
     rime_configured: bool = False
 
 

@@ -7,6 +7,7 @@ safe global error handlers, and router mount points.
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.config import get_settings
@@ -15,10 +16,28 @@ from backend.app.models.schemas import HealthResponse, RootStatusResponse
 
 app = FastAPI(
     title="Rime Voice AI Assistant with Interruption & Recovery",
-    description="DataForge 2026 Rime Hackathon - Phase 5 Real Rime TTS Integration",
-    version="0.3.0",
+    description="DataForge 2026 Rime Hackathon - Phase 6 Rime Audio / Playback Pipeline",
+    version="0.4.0",
     docs_url="/docs",
     redoc_url="/redoc",
+)
+
+# CORS Middleware to allow browser frontend communication and exposed custom headers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=[
+        "X-Session-ID",
+        "X-Turn-ID",
+        "X-Provider",
+        "X-Model-ID",
+        "X-Speaker",
+        "X-Audio-Format",
+        "X-Audio-Bytes-Length",
+    ],
 )
 
 # Mount API Routers
@@ -86,6 +105,6 @@ def root():
     return {
         "service": "Rime Voice AI Assistant",
         "status": "online",
-        "phase": 5,
+        "phase": 6,
         "rime_configured": settings.is_rime_configured,
     }

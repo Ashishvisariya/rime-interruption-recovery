@@ -92,7 +92,8 @@ When a user interrupts an ongoing AI voice response and changes their request, c
 - **Phase 3 Architecture & Concurrency Design:** `PASSED`
 - **Phase 4 FastAPI Backend Foundation:** `PASSED`
 - **Phase 5 Genuine Rime TTS Integration:** `PASSED`
-- **Phase 6+ Full Pipeline Benchmarks:** *Pending Phase 6+ Implementation*
+- **Phase 6 Audio Delivery & Playback Pipeline:** `PASSED`
+- **Phase 7+ Full Pipeline & Interruption Benchmarks:** *Pending Phase 7+ Implementation*
 
 ---
 
@@ -168,7 +169,32 @@ Automated tests in `tests/test_rime_tts.py` use mocked HTTP boundaries to verify
 
 ---
 
-### Known Limitations
-- Mid-speech client-side Web Audio API streaming is planned for WebSocket full-duplex integration in Phase 6.
-- In Phase 5, REST TTS delivers complete audio buffers per turn with two-phase turn validation gates.
+## 9. Phase 6 Audio Playback Pipeline Evidence
+
+### Playback Architecture & State Transitions
+The browser client implements `AudioPlaybackManager` (`frontend/src/services/audio.js`), orchestrating browser-native playback with strict turn validation:
+- **States Supported:** `IDLE`, `LOADING`, `READY`, `PLAYING`, `STOPPING`, `STOPPED`, `COMPLETED`, `DISCARDED`, `ERROR`.
+- **Immediate Barge-in Mechanism (`stopCurrentAudio`):** Pauses audio hardware output, detaches media source, flushes queued buffers, and transitions to `STOPPED` then `IDLE`.
+- **Turn Isolation Invariant:** Any audio chunk or queue item where `turn_id < active_turn_id` is immediately rejected (`DISCARDED`).
+- **Observability:** Emits structured JSON events (`AUDIO_LOAD_STARTED`, `AUDIO_READY`, `AUDIO_PLAY_STARTED`, `AUDIO_PLAY_COMPLETED`, `AUDIO_STOP_REQUESTED`, `AUDIO_STOPPED`, `AUDIO_DISCARDED`, `AUDIO_PLAYBACK_ERROR`).
+
+### Unit Test Verification (Mocked Browser Environment)
+Automated test suite (`frontend/tests/playback_manager.test.mjs`):
+1. Audio starts in `IDLE` state: `PASSED`
+2. Audio transitions to `PLAYING`: `PASSED`
+3. Completion transitions correctly to `COMPLETED` then `IDLE`: `PASSED`
+4. `stopCurrentAudio` stops active audio immediately: `PASSED`
+5. `stopCurrentAudio` clears obsolete queued audio: `PASSED`
+6. Stale turn audio is rejected and discarded: `PASSED`
+7. Newer turn audio can play cleanly: `PASSED`
+8. Playback errors transition safely to `ERROR` and recover to `IDLE`: `PASSED`
+9. Stopping twice is safe and idempotent: `PASSED`
+10. Obsolete audio cannot resume automatically after stop: `PASSED`
+
+### Production Build Verification
+- Vite production bundle compiled cleanly in `2.11s` (`dist/assets/index-DXSd3qzu.js`, `dist/assets/index-BFJGTF_S.css`).
+
+### Security Verification
+- Zero `RIME_API_KEY` or credentials present in frontend client or bundle. All synthesis requests proxy through backend FastAPI gateway.
+
 

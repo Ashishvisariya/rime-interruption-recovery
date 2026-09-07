@@ -2,8 +2,8 @@
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Phase:** Phase 5 — Real Rime TTS Integration  
-**Status:** RIME TTS SERVICE & VALIDATION GATES COMPLETE (Interruption pipeline integration pending in Phase 6)
+**Phase:** Phase 6 — Rime Audio / Playback Pipeline  
+**Status:** PLAYBACK PIPELINE & STOP/FLUSH ENGINE COMPLETE (Speech interruption detection and recovery pending in Phase 7+)
 
 ---
 
@@ -195,56 +195,86 @@ The **Stale Result Guard** acts as an mandatory gate before four critical bounda
 
 ---
 
-## 8. Rime Audio Lifecycle & Service Integration
+## 8. Rime Audio Lifecycle & Playback Pipeline
 
-Rime is the **primary spoken-output provider**. In Phase 5, the service layer integrates directly with the live Rime Labs TTS API (`https://users.rime.ai/v1/rime-tts`).
+Rime is the **primary spoken-output provider**. In Phase 5 & 6, the system implements a unified audio generation and browser playback pipeline:
 
-### Dataflow Architecture:
+### End-to-End Pipeline Dataflow:
 ```
+Backend Execution Flow:
 Text Payload
    │
    ▼
-RimeTTSService
+[Pre-Synthesis Turn Validation: session.validate_turn(turn_id)]
    │
    ▼
-Rime API (POST https://users.rime.ai/v1/rime-tts)
+RimeTTSService (Async HTTP POST to https://users.rime.ai/v1/rime-tts)
    │
    ▼
-Raw Audio Bytes (MP3/WAV)
+[Post-Synthesis Turn Invariant Check: session.validate_turn(turn_id)]
+   ├── If active ──▶ Binary Audio Response (HTTP 200 with X-Turn-ID, X-Session-ID headers)
+   └── If stale  ──▶ Audio Discarded Immediately (HTTP 409 Conflict)
+
+Frontend Playback Flow:
+Binary Audio Response
    │
    ▼
-Turn Validation Gate [session.validate_turn(turn_id)]
-   ├── If active ──▶ Client / API Response (HTTP 200)
-   └── If stale  ──▶ Discarded (HTTP 409 Conflict)
+AudioPlaybackManager (frontend/src/services/audio.js)
+   │ [Pre-Play Turn Validation: item.turnId === activeTurnId]
+   ▼
+HTML5 / Web Audio Element
+   │
+   ▼
+Speaker Output to User
 ```
 
-Each synthesized sentence or audio chunk adheres to the following finite state machine:
-
+### Playback Finite State Machine:
 ```
                   ┌───────────────┐
-                  │  GENERATING   │
+                  │     IDLE      │
+                  └───────┬───────┘
+                          │ (playAudio / enqueueAudio)
+                          ▼
+                  ┌───────────────┐
+                  │    LOADING    │
+                  └───────┬───────┘
+                          │ (Turn invalidated during prep) ──▶ DISCARDED ──▶ IDLE
+                          ▼
+                  ┌───────────────┐
+                  │     READY     │
+                  └───────┬───────┘
+                          │ (audio.play())
+                          ▼
+                  ┌───────────────┐
+                  │    PLAYING    │
                   └───────┬───────┘
                           │
-            ┌─────────────┼─────────────┐
-            │             │             │ (Interrupted / Cancelled)
-            ▼             ▼             ▼
-      ┌───────────┐ ┌───────────┐ ┌───────────┐
-      │   READY   │ │ CANCELLED │ │ DISCARDED │
-      └─────┬─────┘ └───────────┘ └───────────┘
-            │
-            │ (Dispatched to Client)
-            ▼
-      ┌───────────┐ (Barge-in)   ┌───────────┐
-      │  PLAYING  │─────────────▶│  STOPPED  │
-      └─────┬─────┘              └───────────┘
-            │ (Completed normal turn)
-            ▼
-      ┌───────────┐
-      │ COMPLETED │
-      └───────────┘
+            ┌─────────────┴─────────────┐
+            │ (Audio finished)          │ (Interruption / stopCurrentAudio)
+            ▼                           ▼
+      ┌───────────┐               ┌───────────┐
+      │ COMPLETED │               │ STOPPING  │
+      └─────┬─────┘               └─────┬─────┘
+            │                           │
+            │                           ▼
+            │                     ┌───────────┐
+            │                     │  STOPPED  │
+            │                     └─────┬─────┘
+            │                           │
+            └─────────────┬─────────────┘
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │     IDLE      │
+                  └───────────────┘
 ```
 
-*Note: Real Rime TTS synthesis with pre- and post-generation turn validation is complete in Phase 5. The full real-time interruption and cancellation streaming pipeline will be orchestrated in Phase 6.*
+### Interruption & Immediate Flush Mechanism:
+When user barge-in occurs in subsequent phases:
+1. Client-side speech/VAD detector immediately triggers `stopCurrentAudio('barge_in')`.
+2. Active audio element is instantly paused, `src` is detached, and audio queue is flushed.
+3. Turn sequence is advanced to $N+1$, permanently rendering any late-arriving audio for Turn $N$ stale and unplayable.
+4. Structured event `AUDIO_STOP_REQUESTED` and `AUDIO_STOPPED` are emitted for latency auditing.
 
 ---
 
@@ -303,8 +333,12 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 | `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 6 |
 | `backend/app/services/llm.py` | LLM streaming and tool execution provider | Phase 6 |
 | `backend/app/services/conversation.py` | Voice pipeline orchestrator | Phase 6 |
-| `frontend/src/` | Lightweight voice client (Web Audio API & WebSocket) | Phase 6 |
-| `tests/` | Unit, integration, and 20-trial evaluation suite | Ongoing (Phase 5 Complete) |
+| `frontend/src/` | Lightweight voice client (Web Audio API & Playback Manager) | Phase 6 (Complete) |
+| `backend/app/core/cancellation.py` | `CancellationManager` & `StaleResultGuard` | Phase 7 |
+| `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 7 |
+| `backend/app/services/llm.py` | LLM streaming and tool execution provider | Phase 7 |
+| `backend/app/services/conversation.py` | Voice pipeline orchestrator | Phase 7 |
+| `tests/` | Unit, integration, and 20-trial evaluation suite | Ongoing (Phase 6 Complete) |
 
 ---
 
