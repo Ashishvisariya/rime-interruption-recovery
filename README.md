@@ -58,13 +58,15 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
 - [x] **Phase 2: Acceptance Test, Success Metrics & Evaluation Specification** *(Completed)*
 - [x] **Phase 3: System Architecture & Concurrency Design** *(Completed)*
 - [x] **Phase 4: FastAPI Backend Foundation** *(Completed)*
-  - Modular FastAPI application with mounted voice session REST endpoints.
-  - Safe, masked environment configuration loader without secret leakage.
-  - Core `VoiceSession` and `SessionStore` enforcing monotonic turn sequencing and the stale-result rejection invariant.
-  - Sanitized global error handling with deterministic `/health` endpoint.
-  - Comprehensive unit test suite with 100% pass rate.
-  - *Status:* **Phase 4 — FastAPI backend foundation implemented; external integrations pending.**
-- [ ] **Phase 5: Core Interruption Engine & Rime TTS Integration** *(Planned)*
+- [x] **Phase 5: Real Rime TTS Integration** *(Completed)*
+  - Direct integration with genuine Rime Labs TTS API (`https://users.rime.ai/v1/rime-tts`).
+  - Flagship `coda` model and `celeste` speaker voice with MP3/WAV audio output.
+  - Safe credential loading from `RIME_API_KEY` with zero client exposure.
+  - Two-phase monotonic turn validation (pre-dispatch and post-return) discarding obsolete speech.
+  - Dedicated REST endpoint `POST /api/voice/tts` with binary audio response and turn metadata headers.
+  - 100% automated test suite pass rate with mocked HTTP boundaries (zero quota drain).
+  - Verified with single real live synthesis request.
+  - *Status:* **Phase 5 — Real Rime TTS integration implemented; interruption pipeline pending.**
 - [ ] **Phase 6: Full Voice Pipeline (STT -> LLM -> Tools -> Rime TTS)** *(Planned)*
 - [ ] **Phase 7: Automated Interruption & Recovery Benchmarking** *(Planned)*
 
@@ -86,9 +88,9 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
    ```bash
    pip install -r backend/requirements.txt
    ```
-3. Run test suite:
+3. Run automated test suite (mocked HTTP layer, 0 API quota used):
    ```bash
-   pytest tests/ -v
+   python -m pytest tests/ -v
    ```
 4. Start FastAPI server locally:
    ```bash
@@ -99,5 +101,22 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
    curl http://127.0.0.1:8000/health
    # Returns: {"status": "ok"}
    ```
+6. Test Rime TTS endpoint:
+   ```bash
+   # 1. Initialize a session
+   curl -X POST http://127.0.0.1:8000/api/voice/session \
+     -H "Content-Type: application/json" \
+     -d '{"session_id": "test_sess"}'
 
-*Note: Live Rime TTS, STT, and LLM external API integrations are planned for subsequent phases. Current phase validates backend foundation and turn isolation invariants with zero external API calls.*
+   # 2. Advance to Turn 1
+   curl -X POST http://127.0.0.1:8000/api/voice/session/test_sess/turn \
+     -H "Content-Type: application/json" \
+     -d '{"prompt": "Hello"}'
+
+   # 3. Synthesize speech for Turn 1 (returns binary audio/mpeg)
+   curl -X POST http://127.0.0.1:8000/api/voice/tts \
+     -H "Content-Type: application/json" \
+     -d '{"session_id": "test_sess", "turn_id": 1, "text": "Hello, this is Rime speech."}' \
+     --output speech.mp3
+   ```
+

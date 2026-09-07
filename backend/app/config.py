@@ -32,6 +32,20 @@ class Settings(BaseModel):
     llm_provider: str = Field(default_factory=lambda: os.getenv("LLM_PROVIDER", "groq").lower())
     stt_provider: str = Field(default_factory=lambda: os.getenv("STT_PROVIDER", "groq").lower())
 
+    # Rime TTS Configuration
+    rime_api_url: str = Field(
+        default_factory=lambda: os.getenv("RIME_API_URL", "https://users.rime.ai/v1/rime-tts")
+    )
+    rime_default_model: str = Field(
+        default_factory=lambda: os.getenv("RIME_DEFAULT_MODEL", "coda")
+    )
+    rime_default_speaker: str = Field(
+        default_factory=lambda: os.getenv("RIME_DEFAULT_SPEAKER", "celeste")
+    )
+    rime_default_format: str = Field(
+        default_factory=lambda: os.getenv("RIME_DEFAULT_FORMAT", "mp3")
+    )
+
     def validate_required_keys(self) -> None:
         """Validate that all required environment variables are present and non-empty.
         

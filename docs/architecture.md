@@ -2,8 +2,8 @@
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Phase:** Phase 3 — Architecture Specification  
-**Status:** SPECIFICATION COMPLETE (Implementation pending in Phase 4+)
+**Phase:** Phase 5 — Real Rime TTS Integration  
+**Status:** RIME TTS SERVICE & VALIDATION GATES COMPLETE (Interruption pipeline integration pending in Phase 6)
 
 ---
 
@@ -195,9 +195,30 @@ The **Stale Result Guard** acts as an mandatory gate before four critical bounda
 
 ---
 
-## 8. Rime Audio Lifecycle
+## 8. Rime Audio Lifecycle & Service Integration
 
-Rime is the **primary spoken-output provider**. Each synthesized sentence or audio chunk adheres to the following finite state machine:
+Rime is the **primary spoken-output provider**. In Phase 5, the service layer integrates directly with the live Rime Labs TTS API (`https://users.rime.ai/v1/rime-tts`).
+
+### Dataflow Architecture:
+```
+Text Payload
+   │
+   ▼
+RimeTTSService
+   │
+   ▼
+Rime API (POST https://users.rime.ai/v1/rime-tts)
+   │
+   ▼
+Raw Audio Bytes (MP3/WAV)
+   │
+   ▼
+Turn Validation Gate [session.validate_turn(turn_id)]
+   ├── If active ──▶ Client / API Response (HTTP 200)
+   └── If stale  ──▶ Discarded (HTTP 409 Conflict)
+```
+
+Each synthesized sentence or audio chunk adheres to the following finite state machine:
 
 ```
                   ┌───────────────┐
@@ -222,6 +243,8 @@ Rime is the **primary spoken-output provider**. Each synthesized sentence or aud
       │ COMPLETED │
       └───────────┘
 ```
+
+*Note: Real Rime TTS synthesis with pre- and post-generation turn validation is complete in Phase 5. The full real-time interruption and cancellation streaming pipeline will be orchestrated in Phase 6.*
 
 ---
 
@@ -272,16 +295,16 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 | Repository Path | Architectural Role | Phase Mapping |
 | :--- | :--- | :--- |
 | `backend/app/config.py` | Configuration & safe credential loading | Phase 1 (Complete) |
-| `backend/app/models/schemas.py` | Pydantic event, turn, and WebSocket message models | Phase 4 |
-| `backend/app/core/session.py` | `SessionManager` & active conversation state | Phase 4 |
-| `backend/app/core/cancellation.py` | `CancellationManager` & `StaleResultGuard` | Phase 4 |
-| `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 4 |
-| `backend/app/services/llm.py` | LLM streaming and tool execution provider | Phase 4 |
-| `backend/app/services/rime_tts.py` | Rime Labs streaming TTS integration | Phase 4 |
-| `backend/app/services/conversation.py` | Voice pipeline orchestrator | Phase 4 |
-| `backend/app/api/voice.py` | Real-time WebSocket endpoint (`/ws/voice`) | Phase 4 |
-| `frontend/src/` | Lightweight voice client (Web Audio API & WebSocket) | Phase 4 |
-| `tests/` | Unit, integration, and 20-trial evaluation suite | Phase 5 |
+| `backend/app/models/schemas.py` | Pydantic event, turn, and TTS request/metadata models | Phase 4 & 5 (Complete) |
+| `backend/app/core/session.py` | `SessionManager` & active conversation state | Phase 4 (Complete) |
+| `backend/app/services/rime_tts.py` | Rime Labs genuine TTS integration | Phase 5 (Complete) |
+| `backend/app/api/voice.py` | Voice session & TTS REST endpoints | Phase 4 & 5 (Complete) |
+| `backend/app/core/cancellation.py` | `CancellationManager` & `StaleResultGuard` | Phase 6 |
+| `backend/app/services/stt.py` | Speech-to-text service provider (Groq/Whisper) | Phase 6 |
+| `backend/app/services/llm.py` | LLM streaming and tool execution provider | Phase 6 |
+| `backend/app/services/conversation.py` | Voice pipeline orchestrator | Phase 6 |
+| `frontend/src/` | Lightweight voice client (Web Audio API & WebSocket) | Phase 6 |
+| `tests/` | Unit, integration, and 20-trial evaluation suite | Ongoing (Phase 5 Complete) |
 
 ---
 

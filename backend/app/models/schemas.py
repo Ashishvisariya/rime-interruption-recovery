@@ -17,8 +17,31 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 4
+    phase: int = 5
     rime_configured: bool = False
+
+
+class RimeTTSRequest(BaseModel):
+    """Payload for TTS generation request."""
+    session_id: str = Field(..., description="Target session ID")
+    turn_id: int = Field(..., ge=1, description="Associated turn ID")
+    text: str = Field(..., min_length=1, description="Text string to synthesize into speech")
+    model_id: Optional[str] = Field(default=None, description="Optional Rime model ID override (e.g. 'coda')")
+    speaker: Optional[str] = Field(default=None, description="Optional speaker voice override (e.g. 'celeste')")
+    audio_format: Optional[str] = Field(default=None, description="Audio format (e.g. 'mp3', 'wav')")
+    lang: Optional[str] = Field(default=None, description="Language code (e.g. 'en')")
+
+
+class RimeTTSMetadata(BaseModel):
+    """Structured metadata describing synthesized speech."""
+    session_id: str = Field(..., description="Associated session ID")
+    turn_id: int = Field(..., description="Associated turn ID")
+    provider: str = Field(default="rime", description="TTS Provider name")
+    model_id: str = Field(..., description="Rime model ID used")
+    speaker: str = Field(..., description="Rime speaker voice used")
+    audio_format: str = Field(..., description="Audio format (mp3, wav)")
+    audio_bytes_length: int = Field(..., ge=0, description="Length of synthesized audio binary in bytes")
+    status: str = Field(default="SUCCESS", description="Synthesis outcome status")
 
 
 class TurnContext(BaseModel):
