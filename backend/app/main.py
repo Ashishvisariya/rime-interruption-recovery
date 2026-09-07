@@ -12,12 +12,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.config import get_settings
 from backend.app.api.voice import router as voice_router
+from backend.app.api.websocket import router as ws_router
 from backend.app.models.schemas import HealthResponse, RootStatusResponse
 
 app = FastAPI(
     title="Rime Voice AI Assistant with Interruption & Recovery",
-    description="DataForge 2026 Rime Hackathon - Phase 13 LLM / Background Task Cancellation",
-    version="0.13.0",
+    description="DataForge 2026 Rime Hackathon - Phase 14 Real-Time Full-Duplex WebSocket Layer",
+    version="0.14.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -47,6 +48,7 @@ app.add_middleware(
 
 # Mount API Routers
 app.include_router(voice_router, prefix="/api")
+app.include_router(ws_router, prefix="/api")
 
 
 # Global Safe Error Handlers
@@ -110,6 +112,6 @@ def root():
     return {
         "service": "Rime Voice AI Assistant",
         "status": "online",
-        "phase": 13,
+        "phase": 14,
         "rime_configured": settings.is_rime_configured,
     }

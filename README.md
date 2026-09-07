@@ -109,7 +109,14 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Clean `asyncio.CancelledError` propagation and resource teardown (releasing `httpx.AsyncClient` connections and unregistering tasks via auto `add_done_callback`).
   - Strict preservation of the foundational invariant: *"Cancellation is best-effort; stale-result rejection is the correctness guarantee."* Stale turn outputs cannot mutate state or history.
   - 100% automated test pass rate: 116 backend tests passing and 31 frontend tests passing (0 live API calls).
-- [ ] **Phase 14: Latency Measurement & Interruption Benchmarking** *(Planned)*
+- [x] **Phase 14: Real-Time Full-Duplex WebSocket Layer** *(Completed)*
+  - Real-time bidirectional WebSocket gateway (`/api/voice/ws/{session_id}` and `/api/voice/ws`) supporting streaming audio frames and structured JSON events.
+  - Standardized event lifecycle (`CONNECT_ACK`, `SPEECH_STARTED`, `AUDIO_DATA`, `SPEECH_ENDED`, `INTERRUPTION_DETECTED`, `TURN_STARTED`, `TRANSCRIPT`, `THINKING`, `AUDIO_STARTED`, `AUDIO_STOP`, `TURN_INTERRUPTED`, `TURN_CANCELLED`, `TURN_COMPLETED`, `ERROR`, `DISCONNECT`).
+  - Strict pre-send monotonic turn validation gate (`session.validate_turn(turn_id)`): prevents stale audio chunks and superseded turn events from transmitting over the WebSocket.
+  - Instant barge-in signaling: forwards VAD interruption cues over the socket, emits `AUDIO_STOP` to client, atomically advances turn sequence, and cancels obsolete in-flight tasks.
+  - Browser WebSocket client (`VoiceWebSocketClient` in `frontend/src/services/websocket.js`) routing realtime streaming events directly to UI state and `AudioPlaybackManager`.
+  - 100% automated test pass rate: 136 backend tests passing and 37 frontend tests passing (0 live API calls).
+- [ ] **Phase 15: Latency Measurement, Benchmarking & Final Polish** *(Planned)*
 
 ---
 

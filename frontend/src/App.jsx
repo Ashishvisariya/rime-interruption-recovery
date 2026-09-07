@@ -3,6 +3,7 @@ import { defaultPlaybackManager, PlaybackState, AudioEventType } from './service
 import { defaultApiClient } from './services/api.js';
 import { defaultRecorder, RecorderState } from './services/recorder.js';
 import { defaultVAD, VADEventType, VADState } from './services/vad.js';
+import { defaultWebSocketClient, WebSocketState, ServerEventType } from './services/websocket.js';
 import SpeakingIndicator from './components/SpeakingIndicator.jsx';
 import Status from './components/Status.jsx';
 import VoiceButton from './components/VoiceButton.jsx';
@@ -24,6 +25,7 @@ export default function App() {
   const [activeTurnId, setActiveTurnId] = useState(0);
   const [playbackState, setPlaybackState] = useState(PlaybackState.IDLE);
   const [agentState, setAgentState] = useState(AgentState.IDLE);
+  const [wsState, setWsState] = useState(WebSocketState.DISCONNECTED);
   const [currentAudio, setCurrentAudio] = useState(null);
   const [events, setEvents] = useState([]);
   const [ttsText, setTtsText] = useState('What is the weather like today?');
@@ -118,6 +120,15 @@ export default function App() {
           ...prev.slice(0, 49),
         ]);
 
+        // 3. Send real-time interruption event over WebSocket
+        defaultWebSocketClient.sendInterruption({
+          previousTurnId: evt.previousTurnId,
+          newTurnId: evt.newTurnId,
+          reason: 'barge_in',
+          detectionSource: evt.detectionSource,
+          assistantState: evt.assistantState,
+        });
+
         try {
           const intRes = await defaultApiClient.interruptSession({
             sessionId: evt.sessionId,
@@ -156,7 +167,92 @@ export default function App() {
       }
     });
 
-    // 5. Initialize backend session
+    // 5. Subscribe to WebSocket events & state
+    const unsubWsState = defaultWebSocketClient.onStateChange((state) => {
+      setWsState(state);
+    });
+
+    const unsubWsEvents = defaultWebSocketClient.onEvent(async (evt) => {
+      setEvents((prev) => [evt, ...prev.slice(0, 49)]);
+
+      if (evt.event_type === ServerEventType.CONNECT_ACK) {
+        if (evt.data?.active_turn_id !== undefined) {
+          setActiveTurnId(evt.data.active_turn_id);
+          defaultPlaybackManager.setActiveTurn(evt.data.active_turn_id);
+        }
+      } else if (evt.event_type === ServerEventType.TURN_STARTED) {
+        if (evt.turn_id) {
+          setActiveTurnId(evt.turn_id);
+          defaultPlaybackManager.setActiveTurn(evt.turn_id);
+        }
+      } else if (evt.event_type === ServerEventType.TRANSCRIPT) {
+        if (evt.data?.transcript) {
+          setTtsText(evt.data.transcript);
+        }
+        if (!evt.data?.is_final) {
+          setAgentState(AgentState.TRANSCRIBING);
+        }
+      } else if (evt.event_type === ServerEventType.THINKING) {
+        setAgentState(AgentState.THINKING);
+      } else if (evt.event_type === ServerEventType.AUDIO_STARTED) {
+        setAgentState(AgentState.PLAYING);
+      } else if (evt.event_type === ServerEventType.AUDIO_DATA) {
+        // Playback audio received from WebSocket if turn is still active
+        const audioB64 = evt.data?.audio_b64;
+        if (audioB64 && evt.turn_id === defaultPlaybackManager.activeTurnId) {
+          try {
+            const byteCharacters = atob(audioB64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+
+            setAgentState(AgentState.PLAYING);
+            await defaultPlaybackManager.playAudio({
+              sessionId: evt.session_id,
+              turnId: evt.turn_id,
+              audioSource: blob,
+              metadata: {
+                speaker: evt.data?.speaker || 'celeste',
+                modelId: evt.data?.model_id || 'coda',
+                format: evt.data?.format || 'mp3',
+                bytes: evt.data?.bytes_length || byteArray.length,
+              },
+            });
+          } catch (err) {
+            console.error('Error decoding/playing WebSocket audio data:', err);
+          }
+        }
+      } else if (evt.event_type === ServerEventType.AUDIO_STOP) {
+        defaultPlaybackManager.stopCurrentAudio(evt.data?.reason || 'ws_audio_stop');
+        setAgentState(AgentState.LISTENING);
+      } else if (evt.event_type === ServerEventType.TURN_INTERRUPTED) {
+        const newId = evt.data?.new_turn_id;
+        if (newId) {
+          setActiveTurnId(newId);
+          defaultPlaybackManager.setActiveTurn(newId);
+        }
+        setAgentState(AgentState.LISTENING);
+      } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
+        if (evt.data?.assistant_response) {
+          setConversationTurns((prev) => [
+            ...prev,
+            {
+              turnId: evt.turn_id,
+              userPrompt: evt.data.user_prompt || '',
+              assistantResponse: evt.data.assistant_response,
+              latencyMs: evt.data.latency_ms,
+            },
+          ]);
+        }
+      } else if (evt.event_type === ServerEventType.ERROR) {
+        console.warn('WebSocket Server Error Event:', evt.data?.error);
+      }
+    });
+
+    // 6. Initialize backend session
     async function init() {
       try {
         const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json());
@@ -166,6 +262,9 @@ export default function App() {
         setSessionId(sess.session_id);
         setActiveTurnId(sess.active_turn_id);
         defaultPlaybackManager.setSession(sess.session_id, sess.active_turn_id);
+
+        // Connect WebSocket client
+        defaultWebSocketClient.connect(sess.session_id);
       } catch (err) {
         console.error('Session initialization error:', err);
       }
@@ -177,6 +276,9 @@ export default function App() {
       unsubEvents();
       unsubRecorder();
       unsubVAD();
+      unsubWsState();
+      unsubWsEvents();
+      defaultWebSocketClient.disconnect();
     };
   }, []);
 

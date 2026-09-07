@@ -2,8 +2,8 @@
 
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
-**Phase:** Phase 13 — LLM / Background Task Cancellation  
-**Status:** BACKGROUND TASK CANCELLATION COMPLETE (Active In-Flight Task Registry -> Immediate Asyncio Task Abort on Interruption -> Clean CancelledError Propagation -> Stale-Result Rejection Correctness Guarantee -> Multi-Session Isolation -> 116 Backend Tests & 31 Frontend Tests Passing with 0 Live API Calls)
+**Phase:** Phase 14 — Real-Time Full-Duplex WebSocket Layer  
+**Status:** FULL-DUPLEX WEBSOCKET LAYER COMPLETE (Bidirectional Event Gateway -> Inbound Audio Chunking -> Outbound Event & Audio Streaming -> Realtime Interruption Discard -> Pre-Send Stale Validation Gate -> 136 Backend Tests & 37 Frontend Tests Passing with 0 Live API Calls)
 
 ---
 
@@ -333,12 +333,14 @@ All lifecycle transitions emit structured JSON events to the latency auditor:
 | `backend/app/services/llm.py` | LLM text generation provider (Groq) | Phase 8 (Complete) |
 | `backend/app/services/conversation.py` | `ConversationManager` orchestrator service | Phase 9, 11 & 13 (Complete) |
 | `backend/app/services/voice_agent.py` | `VoiceAgentOrchestrator` E2E pipeline service with task registration & cancellation | Phase 10 & 13 (Complete) |
+| `backend/app/api/websocket.py` | Real-time full-duplex Voice WebSocket gateway & `VoiceWebSocketManager` | Phase 14 (Complete) |
+| `frontend/src/services/websocket.js` | Browser `VoiceWebSocketClient` streaming manager | Phase 14 (Complete) |
 | `frontend/src/services/vad.js` | Browser-native Voice Activity Detection & Interruption Detector | Phase 11 (Complete) |
 | `frontend/src/services/recorder.js` | Push-to-talk microphone audio recording service | Phase 7 (Complete) |
 | `frontend/src/components/VoiceButton.jsx` | Push-to-talk microphone, Barge-in trigger & VAD UI controls | Phase 7, 10 & 11 (Complete) |
-| `frontend/src/` | Full Voice Assistant Client (Web Audio API, VAD & Playback Manager) | Phase 6, 7, 10, 11 & 12 (Complete) |
+| `frontend/src/` | Full Voice Assistant Client (Web Audio API, VAD & Playback Manager) | Phase 6, 7, 10, 11, 12 & 14 (Complete) |
 | `backend/app/core/cancellation.py` | `CancellationManager` & Task Abort Hub indexed by `(session_id, turn_id)` | Phase 13 (Complete) |
-| `tests/` | Unit, integration, interruption, cancellation, and voice orchestration test suite | Phase 13 Complete: 116 backend tests, 31 frontend tests |
+| `tests/` | Unit, integration, interruption, cancellation, and WebSocket test suite | Phase 14 Complete: 136 backend tests, 37 frontend tests |
 
 ---
 
