@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from backend.app.core.session import default_session_store
 from backend.app.models.schemas import (
     ConversationContextResponse,
+    InterruptionEventRequest,
+    InterruptionEventResponse,
     LLMRequest,
     LLMResponse,
     RimeTTSRequest,
@@ -150,22 +152,51 @@ def get_conversation_context(session_id: str) -> ConversationContextResponse:
 
 @router.post(
     "/session/{session_id}/interrupt",
-    response_model=VoiceSessionInfo,
-    summary="Interrupt Turn",
-    description="Marks the active turn as interrupted and superseded.",
+    response_model=InterruptionEventResponse,
+    summary="Interrupt Turn & Register Barge-in",
+    description="Registers an interruption/barge-in event, marks previous active turn as interrupted, and advances turn.",
 )
-def interrupt_turn(session_id: str, request: Optional[InterruptTurnRequest] = None) -> VoiceSessionInfo:
+def interrupt_turn(session_id: str, request: Optional[InterruptionEventRequest] = None) -> InterruptionEventResponse:
     session = default_session_store.get_session(session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session '{session_id}' not found.",
         )
-    turn_id = request.turn_id if request and request.turn_id else session.active_turn_id
-    reason = request.reason if request else "user_interruption"
-    if turn_id > 0:
-        session.mark_turn_interrupted(turn_id=turn_id, reason=reason)
-    return session.to_info()
+    if not session.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Session '{session_id}' is closed.",
+        )
+
+    reason = request.reason if request and request.reason else "barge_in"
+    detection_source = request.detection_source if request and request.detection_source else "vad"
+    advance_turn = request.advance_turn if (request and request.advance_turn is not None) else True
+    new_prompt = request.new_prompt if request else None
+    assistant_state = request.assistant_state if request else None
+
+    if advance_turn:
+        result = session.interrupt_and_advance(
+            reason=reason,
+            detection_source=detection_source,
+            new_prompt=new_prompt,
+            assistant_state=assistant_state,
+        )
+        return InterruptionEventResponse(**result)
+    else:
+        target_turn_id = request.turn_id if (request and request.turn_id) else session.active_turn_id
+        if target_turn_id > 0:
+            session.mark_turn_interrupted(turn_id=target_turn_id, reason=reason)
+        return InterruptionEventResponse(
+            session_id=session.session_id,
+            previous_turn_id=target_turn_id,
+            new_turn_id=session.active_turn_id,
+            status="interrupted",
+            timestamp_ms=int(time.time() * 1000),
+            reason=reason,
+            detection_source=detection_source,
+            assistant_state=assistant_state,
+        )
 
 
 @router.post(

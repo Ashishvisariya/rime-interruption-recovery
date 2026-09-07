@@ -3,6 +3,7 @@ import { PlaybackState } from '../services/audio.js';
 
 export default function Status({ sessionId, activeTurnId, state, agentState, metadata, backendStatus }) {
   const getBadgeClass = () => {
+    if (agentState === 'INTERRUPTING') return 'badge-interrupting';
     if (agentState === 'LISTENING') return 'badge-recording';
     if (agentState === 'TRANSCRIBING' || agentState === 'THINKING' || agentState === 'SYNTHESIZING') return 'badge-loading';
     if (state === PlaybackState.PLAYING) return 'badge-playing';

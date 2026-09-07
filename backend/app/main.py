@@ -110,6 +110,6 @@ def root():
     return {
         "service": "Rime Voice AI Assistant",
         "status": "online",
-        "phase": 10,
+        "phase": 11,
         "rime_configured": settings.is_rime_configured,
     }

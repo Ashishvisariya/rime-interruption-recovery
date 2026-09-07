@@ -8,12 +8,16 @@ export default function VoiceButton({
   onProcessText,
   onStop,
   onToggleRecord,
+  onBargeIn,
+  onToggleVAD,
   isRecording,
   isProcessing,
   isLoading,
+  isVADActive,
   activeTurnId,
 }) {
   const isPlaying = state === PlaybackState.PLAYING;
+  const isAssistantBusy = isPlaying || agentState === 'THINKING' || agentState === 'SYNTHESIZING';
 
   return (
     <div className="controls-panel glass-card">
@@ -36,6 +40,27 @@ export default function VoiceButton({
         </button>
 
         <button
+          id="btn-barge-in"
+          className={`btn btn-warning ${isAssistantBusy ? 'pulse-warning' : ''}`}
+          onClick={onBargeIn}
+          disabled={!isAssistantBusy}
+          title="Trigger speech barge-in interruption while assistant is active"
+        >
+          <span className="btn-icon">⚡</span>
+          <span>Barge-In / Interruption</span>
+        </button>
+
+        <button
+          id="btn-toggle-vad"
+          className={`btn ${isVADActive ? 'btn-success' : 'btn-secondary'}`}
+          onClick={onToggleVAD}
+          title={isVADActive ? 'Continuous VAD active (listening for speech)' : 'Enable Continuous VAD for Hands-Free Barge-In'}
+        >
+          <span className="btn-icon">{isVADActive ? '🟢' : '⚪'}</span>
+          <span>{isVADActive ? 'VAD Active (Listening)' : 'Enable Continuous VAD'}</span>
+        </button>
+
+        <button
           id="btn-synthesize-play"
           className="btn btn-primary"
           onClick={onProcessText}
@@ -53,7 +78,7 @@ export default function VoiceButton({
           disabled={isLoading || isRecording || isProcessing}
           title="Increment active turn sequence. Inactive/superseded older audio is instantly invalidated."
         >
-          <span className="btn-icon">⚡</span>
+          <span className="btn-icon">⏩</span>
           <span>Advance to Turn #{activeTurnId + 1}</span>
         </button>
 
@@ -62,10 +87,10 @@ export default function VoiceButton({
           className={`btn btn-danger ${isPlaying ? 'pulse-stop' : ''}`}
           onClick={onStop}
           disabled={state === PlaybackState.IDLE && !isPlaying}
-          title="Immediately halt active audio and flush buffers (Barge-in simulation)"
+          title="Immediately halt active audio and flush buffers"
         >
           <span className="btn-icon">⏹</span>
-          <span>Stop / Interrupt Speech</span>
+          <span>Stop Audio</span>
         </button>
       </div>
     </div>

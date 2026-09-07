@@ -30,7 +30,7 @@ class RootStatusResponse(BaseModel):
     """Root service status response model."""
     service: str = "Rime Voice AI Assistant"
     status: str = "online"
-    phase: int = 10
+    phase: int = 11
     rime_configured: bool = False
 
 
@@ -175,3 +175,26 @@ class EventPayload(BaseModel):
     component: str = Field(..., description="Component emitting the event")
     status: str = Field(default="SUCCESS", description="Execution status: SUCCESS, FAILED, or DISCARDED")
     details: Dict[str, Any] = Field(default_factory=dict, description="Additional context or timing metadata")
+
+
+class InterruptionEventRequest(BaseModel):
+    """Payload to signal a real-time speech interruption / barge-in event."""
+    turn_id: Optional[int] = Field(default=None, description="Optional specific turn ID to interrupt (defaults to active)")
+    reason: Optional[str] = Field(default="barge_in", description="Reason for interruption: barge_in, manual, speech_detected")
+    detection_source: Optional[str] = Field(default="vad", description="Source of detection: vad, client_vad, manual")
+    advance_turn: Optional[bool] = Field(default=True, description="Whether to automatically advance to the next active turn")
+    new_prompt: Optional[str] = Field(default=None, description="Optional user speech prompt starting the new turn")
+    assistant_state: Optional[str] = Field(default=None, description="State of the assistant when interruption occurred (PLAYING, SYNTHESIZING, THINKING)")
+
+
+class InterruptionEventResponse(BaseModel):
+    """Structured response returned when an interruption is registered and turn transitioned."""
+    session_id: str = Field(..., description="Associated session ID")
+    previous_turn_id: int = Field(..., description="The superseded/interrupted turn ID")
+    new_turn_id: int = Field(..., description="The newly active monotonic turn ID")
+    status: str = Field(default="interrupted", description="Interruption status")
+    timestamp_ms: int = Field(..., description="Epoch timestamp of interruption detection in milliseconds")
+    reason: str = Field(default="barge_in", description="Reason for interruption")
+    detection_source: str = Field(default="vad", description="Detection source")
+    assistant_state: Optional[str] = Field(default=None, description="Assistant state at moment of detection")
+

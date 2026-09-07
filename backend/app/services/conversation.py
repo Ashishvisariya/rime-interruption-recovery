@@ -6,7 +6,7 @@ and guarantees stale-result rejection across asynchronous workers.
 Zero external API calls are executed in this service.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from backend.app.core.session import SessionStore, VoiceSession, default_session_store
 from backend.app.models.schemas import ChatMessage, VoiceSessionInfo, VoiceTurn
 
@@ -145,6 +145,28 @@ class ConversationManager:
         if target_turn_id <= 0:
             return False
         return session.mark_turn_interrupted(turn_id=target_turn_id, reason=reason)
+
+    def interrupt_and_advance_turn(
+        self,
+        session_id: str,
+        reason: Optional[str] = "barge_in",
+        detection_source: Optional[str] = "vad",
+        new_prompt: Optional[str] = None,
+        assistant_state: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Atomically mark the active turn as interrupted and advance to the next monotonic turn."""
+        session = self._store.get_session(session_id)
+        if not session:
+            raise SessionNotFoundError(f"Session '{session_id}' not found.")
+        if not session.is_active:
+            raise SessionClosedError(f"Session '{session_id}' is closed.")
+
+        return session.interrupt_and_advance(
+            reason=reason,
+            detection_source=detection_source,
+            new_prompt=new_prompt,
+            assistant_state=assistant_state,
+        )
 
     def cancel_turn(self, session_id: str, turn_id: int, reason: Optional[str] = None) -> bool:
         """Cancel a turn."""

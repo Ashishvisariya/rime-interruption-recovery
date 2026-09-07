@@ -248,6 +248,51 @@ export class VoiceApiClient {
 
     return { blob, headers };
   }
+
+  /**
+   * Signal a real-time interruption / barge-in event to the backend.
+   * Atomically marks the previous turn as interrupted and advances to next active turn.
+   * @param {Object} params
+   * @param {string} params.sessionId
+   * @param {number} [params.turnId]
+   * @param {string} [params.reason]
+   * @param {string} [params.detectionSource]
+   * @param {boolean} [params.advanceTurn]
+   * @param {string} [params.assistantState]
+   * @returns {Promise<{ session_id: string, previous_turn_id: number, new_turn_id: number, status: string, timestamp_ms: number, reason: string, detection_source: string, assistant_state: string }>}
+   */
+  async interruptSession({
+    sessionId,
+    turnId = null,
+    reason = 'barge_in',
+    detectionSource = 'vad',
+    advanceTurn = true,
+    assistantState = null,
+  }) {
+    const payload = {
+      turn_id: turnId,
+      reason,
+      detection_source: detectionSource,
+      advance_turn: advanceTurn,
+      assistant_state: assistantState,
+    };
+
+    const res = await fetch(`${this.baseUrl}/voice/session/${encodeURIComponent(sessionId)}/interrupt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({ error: res.statusText }));
+      const error = new Error(errData.error || `Interruption request failed (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
+
+    return res.json();
+  }
 }
 
 export const defaultApiClient = new VoiceApiClient();
+

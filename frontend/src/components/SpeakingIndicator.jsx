@@ -7,9 +7,11 @@ export default function SpeakingIndicator({ state, agentState, currentAudio }) {
   const isThinking = agentState === 'THINKING';
   const isTranscribing = agentState === 'TRANSCRIBING';
   const isListening = agentState === 'LISTENING';
+  const isInterrupting = agentState === 'INTERRUPTING';
   const isStopped = state === PlaybackState.STOPPED;
 
   const getOrbIcon = () => {
+    if (isInterrupting) return '⚡';
     if (isListening) return '🎙️';
     if (isTranscribing) return '📝';
     if (isThinking) return '🧠';
@@ -21,6 +23,7 @@ export default function SpeakingIndicator({ state, agentState, currentAudio }) {
   };
 
   const getStatusLabel = () => {
+    if (isInterrupting) return { text: 'Interruption Detected! Monotonic turn transitioning...', cls: 'interrupting' };
     if (isListening) return { text: 'Listening to your voice...', cls: 'recording' };
     if (isTranscribing) return { text: 'Transcribing speech via Groq Whisper...', cls: 'loading' };
     if (isThinking) return { text: 'Reasoning & Generating response via Groq LLM (qwen/qwen3.6-27b)...', cls: 'thinking' };
@@ -33,7 +36,7 @@ export default function SpeakingIndicator({ state, agentState, currentAudio }) {
     }
     if (isStopped) return { text: 'Speech Halted (Immediate Interruption / Cutoff)', cls: 'stopped' };
     if (agentState === 'ERROR' || state === PlaybackState.ERROR) return { text: 'Pipeline Error occurred', cls: 'error' };
-    return { text: 'Voice Agent Ready — Press Push-to-Talk to speak', cls: 'idle' };
+    return { text: 'Voice Agent Ready — Press Push-to-Talk or Speak to Barge-In', cls: 'idle' };
   };
 
   const statusInfo = getStatusLabel();

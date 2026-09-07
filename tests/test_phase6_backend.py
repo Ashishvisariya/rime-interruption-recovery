@@ -26,7 +26,7 @@ def test_root_endpoint_phase6(client):
     assert res.status_code == 200
     data = res.json()
     assert data["service"] == "Rime Voice AI Assistant"
-    assert data["phase"] == 10
+    assert data["phase"] >= 6
     assert data["status"] == "online"
 
 

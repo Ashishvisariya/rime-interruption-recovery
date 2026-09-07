@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { defaultPlaybackManager, PlaybackState, AudioEventType } from './services/audio.js';
 import { defaultApiClient } from './services/api.js';
 import { defaultRecorder, RecorderState } from './services/recorder.js';
+import { defaultVAD, VADEventType, VADState } from './services/vad.js';
 import SpeakingIndicator from './components/SpeakingIndicator.jsx';
 import Status from './components/Status.jsx';
 import VoiceButton from './components/VoiceButton.jsx';
@@ -14,6 +15,7 @@ export const AgentState = {
   THINKING: 'THINKING',
   SYNTHESIZING: 'SYNTHESIZING',
   PLAYING: 'PLAYING',
+  INTERRUPTING: 'INTERRUPTING',
   ERROR: 'ERROR',
 };
 
@@ -30,8 +32,15 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [backendStatus, setBackendStatus] = useState(null);
+  const [isVADActive, setIsVADActive] = useState(false);
 
-  // Initialize session and subscribe to Playback Manager & Recorder events
+  // Sync VAD callbacks with current React state
+  useEffect(() => {
+    defaultVAD.getAssistantState = () => agentState;
+    defaultVAD.getSessionContext = () => ({ sessionId, activeTurnId });
+  }, [agentState, sessionId, activeTurnId]);
+
+  // Initialize session and subscribe to Playback Manager, Recorder, and VAD events
   useEffect(() => {
     // 1. Subscribe to playback state changes
     const unsubState = defaultPlaybackManager.onStateChange((state, prevState, audio) => {
@@ -62,7 +71,64 @@ export default function App() {
       }
     });
 
-    // 4. Initialize backend session
+    // 4. Subscribe to VAD real-time interruption events
+    const unsubVAD = defaultVAD.onEvent(async (evt) => {
+      if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
+        setAgentState(AgentState.INTERRUPTING);
+        setEvents((prev) => [
+          {
+            event_type: 'INTERRUPTION_DETECTED',
+            timestamp_ms: evt.timestamp,
+            session_id: evt.sessionId,
+            turn_id: evt.previousTurnId,
+            state: playbackState,
+            details: {
+              previous_turn_id: evt.previousTurnId,
+              new_turn_id: evt.newTurnId,
+              detection_source: evt.detectionSource,
+              assistant_state: evt.assistantState,
+              energy: evt.energy?.toFixed(4),
+              speech_duration_ms: evt.speechDurationMs,
+            },
+          },
+          ...prev.slice(0, 49),
+        ]);
+
+        try {
+          const intRes = await defaultApiClient.interruptSession({
+            sessionId: evt.sessionId,
+            turnId: evt.previousTurnId,
+            reason: 'barge_in',
+            detectionSource: evt.detectionSource,
+            advanceTurn: true,
+            assistantState: evt.assistantState,
+          });
+
+          setActiveTurnId(intRes.new_turn_id);
+          defaultPlaybackManager.setActiveTurn(intRes.new_turn_id);
+
+          setEvents((prev) => [
+            {
+              event_type: 'INTERRUPTION_TURN_TRANSITIONED',
+              timestamp_ms: intRes.timestamp_ms,
+              session_id: intRes.session_id,
+              turn_id: intRes.new_turn_id,
+              state: playbackState,
+              details: {
+                previous_turn_id: intRes.previous_turn_id,
+                new_turn_id: intRes.new_turn_id,
+                status: intRes.status,
+              },
+            },
+            ...prev.slice(0, 49),
+          ]);
+        } catch (err) {
+          console.error('Failed to notify backend of interruption:', err);
+        }
+      }
+    });
+
+    // 5. Initialize backend session
     async function init() {
       try {
         const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json());
@@ -82,6 +148,7 @@ export default function App() {
       unsubState();
       unsubEvents();
       unsubRecorder();
+      unsubVAD();
     };
   }, []);
 
@@ -283,6 +350,79 @@ export default function App() {
     setAgentState(AgentState.IDLE);
   };
 
+  // Handler: Manual Barge-In Trigger
+  const handleBargeIn = async () => {
+    if (!sessionId) return;
+    const prevTurnId = activeTurnId;
+    const prevAgentState = agentState;
+    setAgentState(AgentState.INTERRUPTING);
+
+    setEvents((prev) => [
+      {
+        event_type: 'INTERRUPTION_DETECTED',
+        timestamp_ms: Date.now(),
+        session_id: sessionId,
+        turn_id: prevTurnId,
+        state: playbackState,
+        details: {
+          previous_turn_id: prevTurnId,
+          new_turn_id: prevTurnId + 1,
+          detection_source: 'manual_barge_in',
+          assistant_state: prevAgentState,
+        },
+      },
+      ...prev.slice(0, 49),
+    ]);
+
+    try {
+      const intRes = await defaultApiClient.interruptSession({
+        sessionId,
+        turnId: prevTurnId,
+        reason: 'barge_in',
+        detectionSource: 'manual_barge_in',
+        advanceTurn: true,
+        assistantState: prevAgentState,
+      });
+
+      setActiveTurnId(intRes.new_turn_id);
+      defaultPlaybackManager.setActiveTurn(intRes.new_turn_id);
+
+      setEvents((prev) => [
+        {
+          event_type: 'INTERRUPTION_TURN_TRANSITIONED',
+          timestamp_ms: intRes.timestamp_ms,
+          session_id: intRes.session_id,
+          turn_id: intRes.new_turn_id,
+          state: playbackState,
+          details: {
+            previous_turn_id: intRes.previous_turn_id,
+            new_turn_id: intRes.new_turn_id,
+            status: intRes.status,
+          },
+        },
+        ...prev.slice(0, 49),
+      ]);
+    } catch (err) {
+      console.error('Failed to trigger manual barge-in:', err);
+    }
+  };
+
+  // Handler: Toggle Continuous VAD
+  const handleToggleVAD = async () => {
+    if (isVADActive) {
+      defaultVAD.stop();
+      setIsVADActive(false);
+    } else {
+      try {
+        await defaultVAD.start();
+        setIsVADActive(true);
+      } catch (err) {
+        console.error('Failed to start VAD:', err);
+        alert(`VAD Error: ${err.message}`);
+      }
+    }
+  };
+
   return (
     <div className="app-container">
       <header className="app-header">
@@ -291,7 +431,7 @@ export default function App() {
           <h1>Rime Voice AI Assistant</h1>
         </div>
         <p className="app-tagline">
-          Phase 10 — End-to-End Voice Agent Orchestration (Groq Whisper STT &bull; Groq LLM &bull; Rime TTS)
+          Phase 11 — Real-Time Interruption & Barge-In Detection (VAD &bull; Monotonic Turn Invalidation)
         </p>
       </header>
 
@@ -318,9 +458,12 @@ export default function App() {
           onProcessText={handleProcessText}
           onStop={handleStopAudio}
           onToggleRecord={handleToggleRecord}
+          onBargeIn={handleBargeIn}
+          onToggleVAD={handleToggleVAD}
           isRecording={isRecording}
           isProcessing={isProcessing}
           isLoading={isLoading}
+          isVADActive={isVADActive}
           activeTurnId={activeTurnId}
         />
 
@@ -333,8 +476,9 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <span>DataForge 2026 Rime Hackathon &bull; Phase 10 Voice Orchestration</span>
+        <span>DataForge 2026 Rime Hackathon &bull; Phase 11 Interruption Detection</span>
       </footer>
     </div>
   );
 }
+

@@ -86,7 +86,16 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - Frontend voice interface supporting 7 distinct agent states: `IDLE`, `LISTENING`, `TRANSCRIBING`, `THINKING`, `SYNTHESIZING`, `PLAYING`, and `ERROR`.
   - 100% automated test pass rate across backend (90 tests with 0 live API calls) and frontend (10 tests).
   - Exactly ONE genuine live end-to-end voice verification run successfully executed (STT $\rightarrow$ LLM $\rightarrow$ Rime TTS $\rightarrow$ `demo/live_agent_response.mp3`). Zero Gemini calls.
-- [ ] **Phase 11: Real-Time Interruption & Barge-In Detection** *(Planned)*
+- [x] **Phase 11: Real-Time Interruption & Barge-In Detection** *(Completed)*
+  - Browser-native Voice Activity Detection (`VoiceActivityDetector` in `frontend/src/services/vad.js`) using Web Audio API / RMS energy analysis.
+  - Configurable detection parameters: RMS energy threshold (`0.02`), sustained speech duration (`150ms` debounce against clicks/keystrokes), silence duration (`700ms`), and event debounce (`400ms`).
+  - Browser microphone constraints enabled: `echoCancellation: true`, `noiseSuppression: true`, `autoGainControl: true`.
+  - Assistant playback awareness: triggers `INTERRUPTION_DETECTED` when user speech begins while assistant is `PLAYING`, `THINKING`, or `SYNTHESIZING`; emits `SPEECH_STARTED` when assistant is `IDLE`.
+  - Server-side atomic turn transition (`interrupt_and_advance` on `VoiceSession` and `POST /api/voice/session/{session_id}/interrupt` endpoint): marks previous turn as `INTERRUPTED` with metadata and immediately makes new monotonic turn `ACTIVE`.
+  - Frontend UI state: added `INTERRUPTING` state, visual feedback in `SpeakingIndicator` and `Status`, manual barge-in button, and continuous VAD mode.
+  - 100% automated test pass rate: 96 backend tests passing and 22 frontend tests passing (0 live API calls).
+  - *Scope Note:* Speech detection and monotonic turn transition are implemented. Physical Rime audio stopping (Phase 12) and LLM/tool task cancellation (Phase 13) are deliberately scheduled for upcoming phases.
+- [ ] **Phase 12: Immediate Rime Audio Output Cancellation** *(Planned)*
 
 ---
 

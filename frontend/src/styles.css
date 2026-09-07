@@ -308,6 +308,13 @@ body {
   border: 1px solid var(--accent-rose);
 }
 
+.badge-interrupting {
+  background: rgba(245, 158, 11, 0.25);
+  color: #fbbf24;
+  border: 1px solid #f59e0b;
+  animation: pulse-ring 1.5s infinite ease-out;
+}
+
 .badge-completed {
   background: rgba(16, 185, 129, 0.15);
   color: var(--accent-emerald);

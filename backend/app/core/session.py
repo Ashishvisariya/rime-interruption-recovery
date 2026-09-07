@@ -9,7 +9,7 @@ Stale-result rejection is strictly enforced for all conversational state mutatio
 import time
 import uuid
 import threading
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from backend.app.models.schemas import (
     ChatMessage,
     TurnContext,
@@ -163,6 +163,79 @@ class VoiceSession:
                 turn.metadata["interruption_reason"] = reason
 
             return True
+
+    def interrupt_and_advance(
+        self,
+        reason: Optional[str] = "barge_in",
+        detection_source: Optional[str] = "vad",
+        new_prompt: Optional[str] = None,
+        assistant_state: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Atomically mark active turn as interrupted and advance to the next monotonic active turn.
+        
+        Guarantees:
+        - Thread-safe atomic turn progression.
+        - Previous turn is marked INTERRUPTED with timestamp and reason.
+        - Newly created turn is immediately authoritative (ACTIVE).
+        - Older turns are rendered stale for validation.
+        """
+        with self._lock:
+            if not self.is_active:
+                raise RuntimeError(f"Cannot interrupt inactive session '{self.session_id}'.")
+
+            now_ms = int(time.time() * 1000)
+            self.updated_at_ms = now_ms
+            prev_turn_id = self.active_turn_id
+
+            # Mark previous active turn as INTERRUPTED
+            if prev_turn_id > 0 and prev_turn_id in self.turns:
+                prev_turn = self.turns[prev_turn_id]
+                if prev_turn.status in (TurnStatus.ACTIVE.value, TurnStatus.CREATED.value):
+                    prev_turn.status = TurnStatus.INTERRUPTED.value
+                    if prev_turn.interrupted_at_ms is None:
+                        prev_turn.interrupted_at_ms = now_ms
+                    prev_turn.metadata["interruption_reason"] = reason or "barge_in"
+                    prev_turn.metadata["detection_source"] = detection_source or "vad"
+                    if assistant_state:
+                        prev_turn.metadata["assistant_state_at_interruption"] = assistant_state
+
+            # Advance turn sequence monotonically
+            self.active_turn_id += 1
+            new_turn_id = self.active_turn_id
+
+            new_turn = VoiceTurn(
+                turn_id=new_turn_id,
+                prompt=new_prompt,
+                status=TurnStatus.ACTIVE.value,
+                created_at_ms=now_ms,
+                metadata={
+                    "triggered_by": "interruption",
+                    "previous_turn_id": prev_turn_id,
+                    "detection_source": detection_source or "vad",
+                },
+            )
+            self.turns[new_turn_id] = new_turn
+
+            if new_prompt and new_prompt.strip():
+                user_msg = ChatMessage(
+                    role="user",
+                    content=new_prompt.strip(),
+                    turn_id=new_turn_id,
+                    timestamp_ms=now_ms,
+                    status="active",
+                )
+                self.messages.append(user_msg)
+
+            return {
+                "session_id": self.session_id,
+                "previous_turn_id": prev_turn_id,
+                "new_turn_id": new_turn_id,
+                "status": "interrupted",
+                "timestamp_ms": now_ms,
+                "reason": reason or "barge_in",
+                "detection_source": detection_source or "vad",
+                "assistant_state": assistant_state,
+            }
 
     def mark_turn_cancelled(self, turn_id: int, reason: Optional[str] = None) -> bool:
         """Mark a turn as cancelled."""
