@@ -53,6 +53,12 @@ from backend.app.services.voice_agent import (
 router = APIRouter(prefix="/voice", tags=["Voice Sessions & Agent Orchestration"])
 
 
+def _safe_header_value(value: object) -> str:
+    """Keep provider text valid for HTTP headers while preserving the audio body."""
+    ascii_value = str(value).encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_value.split())
+
+
 class CreateSessionRequest(BaseModel):
     """Optional session initialization payload."""
     session_id: Optional[str] = None
@@ -463,6 +469,8 @@ async def respond_with_llm(request: LLMRequest) -> LLMResponse:
         session_id=request.session_id,
         turn_id=request.turn_id,
         text=result["text"],
+        response=result.get("response", result["text"]),
+        final_response=result.get("final_response", result["text"]),
         provider=result["provider"],
         model=result["model"],
         prompt_tokens=result.get("prompt_tokens"),
@@ -559,6 +567,7 @@ async def process_agent_audio(
         "X-Turn-ID": str(result.turn_id),
         "X-User-Transcript": _safe_header_value(result.user_prompt),
         "X-Assistant-Response": _safe_header_value(result.assistant_text),
+        "X-Final-Response": _safe_header_value(result.final_response),
         "X-LLM-Provider": _safe_header_value(result.llm_metadata.get("provider", "groq")),
         "X-LLM-Model": _safe_header_value(result.llm_metadata.get("model", "qwen/qwen3.6-27b")),
         "X-Provider": _safe_header_value(result.tts_metadata.provider),
@@ -636,6 +645,7 @@ async def process_agent_text(request: VoiceAgentTextRequest) -> Response:
         "X-Turn-ID": str(result.turn_id),
         "X-User-Transcript": _safe_header_value(result.user_prompt),
         "X-Assistant-Response": _safe_header_value(result.assistant_text),
+        "X-Final-Response": _safe_header_value(result.final_response),
         "X-LLM-Provider": _safe_header_value(result.llm_metadata.get("provider", "groq")),
         "X-LLM-Model": _safe_header_value(result.llm_metadata.get("model", "qwen/qwen3.6-27b")),
         "X-Provider": _safe_header_value(result.tts_metadata.provider),

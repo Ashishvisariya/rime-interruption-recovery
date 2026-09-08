@@ -235,7 +235,11 @@ class ConversationManager:
         session = self._store.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found.")
-        return session.get_context_for_llm(system_prompt=system_prompt, max_messages=max_messages)
+        # Keep recent context bounded so stale drafts cannot dominate later turns.
+        return session.get_context_for_llm(
+            system_prompt=system_prompt,
+            max_messages=max_messages if max_messages is not None else 8,
+        )
 
     def get_conversation_history(self, session_id: str) -> List[ChatMessage]:
         """Retrieve full committed chat message history."""
