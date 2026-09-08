@@ -20,6 +20,8 @@ export const AgentState = {
   ERROR: 'ERROR',
 };
 
+import { sanitizeFinalResponse } from './services/response_sanitizer.js';
+
 export default function App() {
   const [sessionId, setSessionId] = useState('');
   const [activeTurnId, setActiveTurnId] = useState(0);
@@ -40,6 +42,70 @@ export default function App() {
   const [interruptionInfo, setInterruptionInfo] = useState(null);
   const [showBenchmarkCard, setShowBenchmarkCard] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
+  const [micLevel, setMicLevel] = useState(0);
+  const [audioDevices, setAudioDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(() => localStorage.getItem('rime_mic_device') || '');
+  const [isTestingMic, setIsTestingMic] = useState(false);
+  const [testMicLevel, setTestMicLevel] = useState(0);
+
+  const testStreamRef = React.useRef(null);
+  const testIntervalRef = React.useRef(null);
+  const testCtxRef = React.useRef(null);
+
+  // Enumerate input devices on mount
+  useEffect(() => {
+    defaultRecorder.getAudioDevices().then((devs) => {
+      if (devs && devs.length > 0) {
+        setAudioDevices(devs);
+      }
+    });
+  }, []);
+
+  // Live Microphone Test Handler
+  const handleTestMic = async () => {
+    if (isTestingMic) {
+      if (testIntervalRef.current) clearInterval(testIntervalRef.current);
+      if (testStreamRef.current) testStreamRef.current.getTracks().forEach((t) => t.stop());
+      if (testCtxRef.current) try { testCtxRef.current.close(); } catch (e) {}
+      setIsTestingMic(false);
+      setTestMicLevel(0);
+      return;
+    }
+
+    try {
+      setErrorMessage('');
+      setIsTestingMic(true);
+      const audioConstraints = selectedDeviceId
+        ? { deviceId: { exact: selectedDeviceId } }
+        : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      testStreamRef.current = stream;
+
+      // Refresh devices with actual human labels now that permission is active
+      const devs = await defaultRecorder.getAudioDevices();
+      setAudioDevices(devs);
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      testCtxRef.current = ctx;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      const src = ctx.createMediaStreamSource(stream);
+      src.connect(analyser);
+      const data = new Float32Array(analyser.fftSize);
+
+      testIntervalRef.current = setInterval(() => {
+        analyser.getFloatTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+        const rms = Math.sqrt(sum / data.length);
+        setTestMicLevel(rms);
+      }, 50);
+    } catch (err) {
+      setIsTestingMic(false);
+      setErrorMessage(`Microphone test failed: ${err.message}`);
+    }
+  };
 
   // Sync VAD callbacks with current React state
   useEffect(() => {
@@ -48,13 +114,13 @@ export default function App() {
   }, [agentState, sessionId, activeTurnId]);
 
   // Connect / Reconnect Helper
-  const connectSession = async () => {
+  const connectSession = async (forceNewSession = false) => {
     try {
       setErrorMessage('');
       const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json()).catch(() => null);
       setBackendStatus(rootRes);
 
-      let targetSessionId = sessionId;
+      let targetSessionId = forceNewSession ? '' : sessionId;
       let targetTurnId = activeTurnId;
 
       if (!targetSessionId) {
@@ -91,7 +157,7 @@ export default function App() {
       setEvents((prev) => [evt, ...prev.slice(0, 59)]);
     });
 
-    // 3. Microphone recorder state
+    // 3. Microphone recorder state & live level
     const unsubRecorder = defaultRecorder.onStateChange((state) => {
       const rec = state === RecorderState.RECORDING;
       setIsRecording(rec);
@@ -103,6 +169,10 @@ export default function App() {
         setAgentState(AgentState.ERROR);
         setErrorMessage('Microphone access was denied or failed to initialize.');
       }
+    });
+
+    const unsubLevel = defaultRecorder.onLevelChange((lvl) => {
+      setMicLevel(lvl);
     });
 
     // 4. VAD real-time barge-in listener
@@ -288,7 +358,9 @@ export default function App() {
         }
         setAgentState(AgentState.LISTENING);
       } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
-        if (evt.data?.assistant_response) {
+        const candidateResponse = evt.data?.response || evt.data?.final_response || evt.data?.assistant_response;
+        if (candidateResponse) {
+          const validatedResponse = sanitizeFinalResponse(candidateResponse);
           setPreviousTurnId(evt.turn_id);
           setPreviousTurnStatus('COMPLETED');
           setConversationTurns((prev) => [
@@ -296,7 +368,7 @@ export default function App() {
             {
               turnId: evt.turn_id,
               userPrompt: evt.data.user_prompt || ttsText,
-              assistantResponse: evt.data.assistant_response,
+              assistantResponse: validatedResponse,
               latencyMs: evt.data.latency_ms,
               speaker: evt.data?.speaker || 'celeste',
               status: 'COMPLETED',
@@ -314,6 +386,7 @@ export default function App() {
       unsubState();
       unsubEvents();
       unsubRecorder();
+      unsubLevel();
       unsubVAD();
       unsubWsState();
       unsubWsEvents();
@@ -361,7 +434,17 @@ export default function App() {
     if (isRecording) {
       try {
         const recResult = await defaultRecorder.stopRecording();
-        if (!recResult || !recResult.blob) return;
+        if (!recResult || !recResult.blob) {
+          setAgentState(AgentState.IDLE);
+          return;
+        }
+
+        // Gracefully handle accidental micro-clicks (< 250ms or < 300 bytes)
+        if (recResult.durationMs < 250 || recResult.blob.size < 300) {
+          setAgentState(AgentState.IDLE);
+          setErrorMessage('Audio clip was too short. Please click Talk, speak your request, and click again to finish.');
+          return;
+        }
 
         setIsProcessing(true);
         setAgentState(AgentState.TRANSCRIBING);
@@ -388,19 +471,20 @@ export default function App() {
         setActiveTurnId(turnId);
         defaultPlaybackManager.setActiveTurn(turnId);
 
+        const validatedResponse = sanitizeFinalResponse(headers.finalResponse);
         setConversationTurns((prev) => [
           ...prev,
           {
             turnId,
             userPrompt: headers.userTranscript,
-            assistantResponse: headers.assistantResponse,
+            assistantResponse: validatedResponse,
             speaker: headers.speaker || 'celeste',
             modelId: headers.modelId || 'coda',
             latencyMs: headers.latencyMs,
             status: 'COMPLETED',
           },
         ]);
-        setTtsText(headers.assistantResponse);
+        setTtsText(validatedResponse);
 
         setEvents((prev) => [
           {
@@ -411,7 +495,7 @@ export default function App() {
             state: playbackState,
             details: {
               transcript: headers.userTranscript,
-              response: headers.assistantResponse,
+              response: headers.finalResponse,
               llm_model: headers.llmModel,
               speaker: headers.speaker,
               audio_bytes: headers.audioBytesLength,
@@ -443,7 +527,14 @@ export default function App() {
     } else {
       try {
         setErrorMessage('');
-        await defaultRecorder.startRecording();
+        if (isTestingMic) {
+          handleTestMic();
+        }
+        defaultPlaybackManager.primePlayback();
+        await defaultRecorder.startRecording(selectedDeviceId || null);
+        defaultRecorder.getAudioDevices().then((devs) => {
+          if (devs && devs.length > 0) setAudioDevices(devs);
+        });
       } catch (err) {
         setAgentState(AgentState.ERROR);
         setErrorMessage(`Microphone Error: ${err.message}`);
@@ -455,6 +546,7 @@ export default function App() {
   const handleProcessText = async () => {
     if (!sessionId || !ttsText.trim()) return;
 
+    defaultPlaybackManager.primePlayback();
     setIsLoading(true);
     setIsProcessing(true);
     setAgentState(AgentState.THINKING);
@@ -469,12 +561,13 @@ export default function App() {
       setActiveTurnId(turnId);
       defaultPlaybackManager.setActiveTurn(turnId);
 
+      const validatedResponse = sanitizeFinalResponse(headers.finalResponse);
       setConversationTurns((prev) => [
         ...prev,
         {
           turnId,
           userPrompt: ttsText,
-          assistantResponse: headers.assistantResponse,
+          assistantResponse: validatedResponse,
           speaker: headers.speaker || 'celeste',
           modelId: headers.modelId || 'coda',
           latencyMs: headers.latencyMs,
@@ -491,7 +584,7 @@ export default function App() {
           state: playbackState,
           details: {
             prompt: ttsText,
-            response: headers.assistantResponse,
+            response: headers.finalResponse,
             llm_model: headers.llmModel,
             speaker: headers.speaker,
             audio_bytes: headers.audioBytesLength,
@@ -664,7 +757,7 @@ export default function App() {
           <button
             type="button"
             className="btn-tiny btn-alert-action"
-            onClick={connectSession}
+            onClick={() => connectSession(true)}
           >
             Reconnect
           </button>
@@ -725,6 +818,8 @@ export default function App() {
           agentState={agentState}
           currentAudio={currentAudio}
           interruptionInfo={interruptionInfo}
+          errorMessage={errorMessage}
+          micLevel={micLevel}
         />
 
         <Status
@@ -737,7 +832,7 @@ export default function App() {
           wsState={wsState}
           metadata={currentAudio?.metadata}
           backendStatus={backendStatus}
-          onReconnect={connectSession}
+          onReconnect={() => connectSession(true)}
         />
 
         <VoiceButton
@@ -754,6 +849,15 @@ export default function App() {
           isLoading={isLoading}
           isVADActive={isVADActive}
           activeTurnId={activeTurnId}
+          audioDevices={audioDevices}
+          selectedDeviceId={selectedDeviceId}
+          onSelectDevice={(id) => {
+            setSelectedDeviceId(id);
+            localStorage.setItem('rime_mic_device', id);
+          }}
+          onTestMic={handleTestMic}
+          isTestingMic={isTestingMic}
+          micLevel={isTestingMic ? testMicLevel : micLevel}
         />
 
         <Transcript
