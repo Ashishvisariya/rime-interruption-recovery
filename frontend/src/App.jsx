@@ -255,9 +255,96 @@ export default function App() {
       setMicLevel(lvl);
     });
 
-    // 4. VAD real-time barge-in listener
+    // 4. VAD real-time barge-in and hands-free continuous speech listener
     const unsubVAD = defaultVAD.onEvent(async (evt) => {
-      if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
+      if (evt.eventType === VADEventType.SPEECH_STARTED) {
+        if (defaultRecorder.state !== RecorderState.RECORDING && !isProcessing) {
+          try {
+            await defaultRecorder.startRecording();
+            setAgentState(AgentState.LISTENING);
+          } catch (e) {
+            console.error('Failed to start recorder on VAD speech onset:', e);
+          }
+        }
+      } else if (evt.eventType === VADEventType.SPEECH_ENDED) {
+        if (defaultRecorder.state === RecorderState.RECORDING) {
+          try {
+            const recResult = await defaultRecorder.stopRecording();
+            if (recResult && recResult.blob && recResult.blob.size > 0) {
+              setIsProcessing(true);
+              setAgentState(AgentState.TRANSCRIBING);
+
+              setAgentState(AgentState.THINKING);
+              const { blob, headers } = await defaultApiClient.processAgentAudio({
+                audioBlob: recResult.blob,
+                sessionId,
+              });
+
+              const turnId = headers.turnId;
+              setActiveTurnId(turnId);
+              defaultPlaybackManager.setActiveTurn(turnId);
+              updateSessionTitleIfFirst(sessionId, headers.userTranscript);
+
+              const validatedResponse = sanitizeFinalResponse(headers.finalResponse || headers.assistantResponse);
+              setConversationTurns((prev) => [
+                ...prev,
+                {
+                  turnId,
+                  userPrompt: headers.userTranscript,
+                  assistantResponse: validatedResponse,
+                  speaker: headers.speaker || 'celeste',
+                  modelId: headers.modelId || 'coda',
+                  latencyMs: headers.latencyMs,
+                  status: 'COMPLETED',
+                },
+              ]);
+              setTtsText('');
+
+              setEvents((prev) => [
+                {
+                  event_type: 'VAD_ORCHESTRATION_SUCCESS',
+                  timestamp_ms: Date.now(),
+                  session_id: headers.sessionId,
+                  turn_id: turnId,
+                  state: playbackState,
+                  details: {
+                    transcript: headers.userTranscript,
+                    response: headers.assistantResponse,
+                    speaker: headers.speaker,
+                    latency_ms: headers.latencyMs,
+                  },
+                },
+                ...prev.slice(0, 59),
+              ]);
+
+              setAgentState(AgentState.PLAYING);
+              await defaultPlaybackManager.playAudio({
+                sessionId: headers.sessionId,
+                turnId: turnId,
+                audioSource: blob,
+                metadata: {
+                  speaker: headers.speaker || 'celeste',
+                  modelId: headers.modelId || 'coda',
+                  format: headers.audioFormat || 'mp3',
+                  bytes: headers.audioBytesLength,
+                },
+              });
+            }
+          } catch (err) {
+            if (err.status === 409 || err.message?.includes('cancelled') || err.message?.includes('superseded')) {
+              console.log('VAD turn processing interrupted cleanly:', err.message);
+              setAgentState(AgentState.LISTENING);
+              setErrorMessage('');
+            } else {
+              console.error('VAD Voice Agent processing error:', err);
+              setAgentState(AgentState.ERROR);
+              setErrorMessage(`VAD Processing Error: ${err.message}`);
+            }
+          } finally {
+            setIsProcessing(false);
+          }
+        }
+      } else if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
         const t_detection = Date.now();
 
         defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
@@ -355,6 +442,13 @@ export default function App() {
           ]);
 
           setAgentState(AgentState.LISTENING);
+          if (defaultRecorder.state !== RecorderState.RECORDING) {
+            try {
+              await defaultRecorder.startRecording();
+            } catch (e) {
+              console.error('Failed to start recorder on interruption:', e);
+            }
+          }
         } catch (err) {
           console.error('Failed to notify backend of interruption:', err);
           setAgentState(AgentState.IDLE);
