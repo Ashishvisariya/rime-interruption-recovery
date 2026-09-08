@@ -134,6 +134,35 @@ async def test_process_turn_text_success(mock_pipeline):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "assistant_text"),
+    [
+        ("Search for a flight from New York to Tokyo.", "Sure. What date would you like to travel?"),
+        ("What is the capital of France?", "The capital of France is Paris."),
+        ("Tell me a quick joke.", "Why did the computer get cold? It left its Windows open."),
+        ("How far is the Moon from Earth?", "The Moon is about 384,400 kilometers away on average."),
+        ("Plan a weekend trip to Delhi.", "Sure. What dates would you like to travel?"),
+    ],
+)
+async def test_five_voice_requests_send_only_natural_text_to_tts(prompt, assistant_text, mock_pipeline):
+    """Verify representative user requests reach TTS without prompt or reasoning text."""
+    default_session_store.clear()
+    session = default_conversation_manager.create_session(f"sess_voice_{abs(hash(prompt))}")
+    llm_result = {**mock_pipeline["llm"], "text": assistant_text}
+    tts = AsyncMock(return_value=(mock_pipeline["audio"], mock_pipeline["tts_metadata"]))
+
+    with patch.object(default_llm_service, "generate", new=AsyncMock(return_value=llm_result)), \
+         patch.object(default_rime_service, "synthesize", new=tts):
+        result = await default_voice_agent.process_turn(
+            session_id=session.session_id,
+            text_prompt=prompt,
+        )
+
+    assert result.assistant_text == assistant_text
+    assert tts.await_args.kwargs["text"] == assistant_text
+
+
+@pytest.mark.asyncio
 async def test_multi_turn_context_retention(mock_pipeline):
     """Verify Turn 2 LLM generation includes Turn 1 conversation context."""
     default_session_store.clear()
@@ -367,3 +396,28 @@ def test_api_agent_empty_audio_rejected(client):
     )
     assert res.status_code == 400
     assert "cannot be empty" in res.json()["error"]
+
+
+def test_api_agent_silence_hallucination_rejected(client):
+    """Verify POST /api/voice/agent/process-audio rejects Whisper silence hallucinations like 'you'."""
+    client.post("/api/voice/session", json={"session_id": "sess_silence_check"})
+
+    hallucinated_stt = TranscriptionResponse(
+        session_id="sess_silence_check",
+        turn_id=1,
+        text="you",
+        provider="groq",
+        model="whisper-large-v3",
+        status="SUCCESS",
+    )
+
+    with patch.object(default_stt_service, "transcribe", new=AsyncMock(return_value=hallucinated_stt)):
+        res = client.post(
+            "/api/voice/agent/process-audio",
+            data={"session_id": "sess_silence_check"},
+            files={"file": ("silent.webm", b"fake_silent_audio", "audio/webm")},
+        )
+
+        assert res.status_code == 400
+        assert "No speech detected" in res.json()["error"]
+

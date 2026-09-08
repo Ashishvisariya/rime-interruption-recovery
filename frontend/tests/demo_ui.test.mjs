@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PlaybackState } from '../src/services/audio.js';
 import { WebSocketState } from '../src/services/websocket.js';
+import { sanitizeFinalResponse } from '../src/services/response_sanitizer.js';
 
 // --- State and Formatting Helpers mirroring UI Components ---
 
@@ -267,3 +268,61 @@ test('10. Zero secret leakage across rendered UI state and errors', () => {
   assert.equal(serialized.includes('apiKey'), false);
   assert.equal(serialized.includes('secret'), false);
 });
+
+test('11. sanitizeFinalResponse removes reasoning, planning steps, and unclosed <think> blocks', () => {
+  const dirty1 = '<think>\n1. Analyze User Input: Delhi weather\n2. Check available tools...\n';
+  assert.equal(sanitizeFinalResponse(dirty1), '');
+
+  const dirty2 = (
+    '1. Check available tools.\n' +
+    '2. I do not have a specific weather tool.\n' +
+    '3. Formulate a response.\n' +
+    '4. Yes. Yes. No markdown.\n' +
+    'Final Answer: Delhi is currently 29°C with partly cloudy skies.'
+  );
+  assert.equal(sanitizeFinalResponse(dirty2), 'Delhi is currently 29°C with partly cloudy skies.');
+
+  const normal = 'Delhi is currently 29°C with partly cloudy skies.';
+  assert.equal(sanitizeFinalResponse(normal), 'Delhi is currently 29°C with partly cloudy skies.');
+});
+
+test('12. TURN_COMPLETED extracts canonical response and protects against raw event/reasoning leakage', () => {
+  const rawEvent = {
+    event_type: 'TURN_COMPLETED',
+    turn_id: 1,
+    data: {
+      type: 'TURN_COMPLETED',
+      turn_id: 1,
+      response: 'Delhi is currently 29°C and partly cloudy.',
+      final_response: 'Delhi is currently 29°C and partly cloudy.',
+      assistant_response: 'Delhi is currently 29°C and partly cloudy.',
+    },
+  };
+
+  const candidate = rawEvent.data?.response || rawEvent.data?.final_response || rawEvent.data?.assistant_response;
+  assert.equal(candidate, 'Delhi is currently 29°C and partly cloudy.');
+  const cleaned = sanitizeFinalResponse(candidate);
+  assert.equal(cleaned, 'Delhi is currently 29°C and partly cloudy.');
+});
+
+test('13. Conversation history rendering does NOT show internal reasoning or planning', () => {
+  const rawTextWithSteps = (
+    '1. Check available tools.\n' +
+    '2. I do not have a weather tool.\n' +
+    'Final Answer: I do not have access to live weather data right now.'
+  );
+  const cleanAnswer = sanitizeFinalResponse(rawTextWithSteps);
+  assert.equal(cleanAnswer.includes('Check available tools'), false);
+  assert.equal(cleanAnswer.includes('weather tool.'), false);
+  assert.equal(cleanAnswer, 'I do not have access to live weather data right now.');
+});
+
+test('14. Normal questions pass through sanitizeFinalResponse without modification', () => {
+  assert.equal(sanitizeFinalResponse('Hello! How can I help you today?'), 'Hello! How can I help you today?');
+  assert.equal(sanitizeFinalResponse('25 times 4 is 100.'), '25 times 4 is 100.');
+  assert.equal(
+    sanitizeFinalResponse('Why did the computer get cold? It left its Windows open.'),
+    'Why did the computer get cold? It left its Windows open.'
+  );
+});
+

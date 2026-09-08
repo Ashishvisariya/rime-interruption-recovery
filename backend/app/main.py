@@ -43,6 +43,7 @@ app.add_middleware(
         "X-Turn-ID",
         "X-User-Transcript",
         "X-Assistant-Response",
+        "X-Final-Response",
         "X-LLM-Provider",
         "X-LLM-Model",
         "X-Provider",

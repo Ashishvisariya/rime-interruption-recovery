@@ -81,6 +81,7 @@ class GroqSTTService:
         data = {
             "model": resolved_model,
             "response_format": "json",
+            "temperature": 0.0,
         }
         if language:
             data["language"] = language

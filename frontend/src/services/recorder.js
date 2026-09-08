@@ -23,6 +23,15 @@ export class MicrophoneRecorder {
     this.audioChunks = [];
     this.startTime = null;
     this._stateListeners = new Set();
+    this._levelListeners = new Set();
+
+    this.audioContext = null;
+    this.analyser = null;
+    this.sourceNode = null;
+    this._levelInterval = null;
+    this.maxEnergy = 0;
+    this.totalEnergy = 0;
+    this.energySamplesCount = 0;
   }
 
   /**
@@ -38,10 +47,26 @@ export class MicrophoneRecorder {
   }
 
   /**
+   * Enumerate available microphone devices in the browser.
+   * @returns {Promise<Array<MediaDeviceInfo>>}
+   */
+  async getAudioDevices() {
+    if (!this.isSupported()) return [];
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter((d) => d.kind === 'audioinput');
+    } catch (e) {
+      console.warn('Failed to enumerate audio devices:', e);
+      return [];
+    }
+  }
+
+  /**
    * Request microphone permission and begin recording audio.
+   * @param {string} [deviceId] Optional device ID to select a specific microphone
    * @returns {Promise<void>}
    */
-  async startRecording() {
+  async startRecording(deviceId = null) {
     if (!this.isSupported()) {
       this._transitionTo(RecorderState.ERROR);
       throw new Error('Microphone recording is not supported in this browser environment.');
@@ -52,14 +77,62 @@ export class MicrophoneRecorder {
     }
 
     try {
+      const audioConstraints = deviceId
+        ? {
+            deviceId: { exact: deviceId },
+            echoCancellation: true,
+            autoGainControl: true,
+            noiseSuppression: false,
+          }
+        : {
+            echoCancellation: true,
+            autoGainControl: true,
+            noiseSuppression: false,
+          };
+
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
+        audio: audioConstraints,
       });
+
+      // Set up AudioContext for live volume metering and silence verification
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          this.audioContext = new AudioCtx();
+          if (this.audioContext.state === 'suspended') {
+            await this.audioContext.resume();
+          }
+          this.analyser = this.audioContext.createAnalyser();
+          this.analyser.fftSize = 512;
+          this.analyser.smoothingTimeConstant = 0.3;
+
+          this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+          this.sourceNode.connect(this.analyser);
+
+          const bufferLength = this.analyser.fftSize;
+          const dataArray = new Float32Array(bufferLength);
+          this.maxEnergy = 0;
+          this.totalEnergy = 0;
+          this.energySamplesCount = 0;
+
+          this._levelInterval = setInterval(() => {
+            if (!this.analyser || this.state !== RecorderState.RECORDING) return;
+            this.analyser.getFloatTimeDomainData(dataArray);
+            let sumSquares = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              const val = dataArray[i];
+              sumSquares += val * val;
+            }
+            const rms = Math.sqrt(sumSquares / dataArray.length);
+            if (rms > this.maxEnergy) this.maxEnergy = rms;
+            this.totalEnergy += rms;
+            this.energySamplesCount++;
+            this._emitLevel(rms);
+          }, 40);
+        }
+      } catch (audioCtxErr) {
+        console.warn('AudioContext volume metering could not be started:', audioCtxErr);
+      }
 
       // Detect supported mime type
       let mimeType = 'audio/webm;codecs=opus';
@@ -95,8 +168,8 @@ export class MicrophoneRecorder {
   }
 
   /**
-   * Stop recording and return the recorded audio Blob.
-   * @returns {Promise<{ blob: Blob, mimeType: string, durationMs: number }>}
+   * Stop recording and return the recorded audio Blob with energy telemetry.
+   * @returns {Promise<{ blob: Blob, mimeType: string, durationMs: number, maxEnergy: number, avgEnergy: number }>}
    */
   async stopRecording() {
     if (this.state !== RecorderState.RECORDING || !this.mediaRecorder) {
@@ -111,14 +184,20 @@ export class MicrophoneRecorder {
           const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
           const blob = new Blob(this.audioChunks, { type: mimeType });
           const durationMs = this.startTime ? Date.now() - this.startTime : 0;
+          const maxEnergy = this.maxEnergy || 0;
+          const avgEnergy = this.energySamplesCount > 0 ? this.totalEnergy / this.energySamplesCount : 0;
+
+          console.log(`[Recorder] Stopped: chunks=${this.audioChunks.length}, size=${blob.size}B, duration=${durationMs}ms, maxEnergy=${maxEnergy.toFixed(4)}, avgEnergy=${avgEnergy.toFixed(4)}`);
 
           this._cleanupStream();
           this._transitionTo(RecorderState.IDLE);
+          this._emitLevel(0);
 
-          resolve({ blob, mimeType, durationMs });
+          resolve({ blob, mimeType, durationMs, maxEnergy, avgEnergy });
         } catch (err) {
           this._cleanupStream();
           this._transitionTo(RecorderState.ERROR);
+          this._emitLevel(0);
           reject(err);
         }
       };
@@ -126,14 +205,20 @@ export class MicrophoneRecorder {
       this.mediaRecorder.onerror = (err) => {
         this._cleanupStream();
         this._transitionTo(RecorderState.ERROR);
+        this._emitLevel(0);
         reject(err);
       };
 
       try {
+        // Explicitly flush buffered timeslice audio before stopping
+        if (this.mediaRecorder.state === 'recording') {
+          this.mediaRecorder.requestData();
+        }
         this.mediaRecorder.stop();
       } catch (err) {
         this._cleanupStream();
         this._transitionTo(RecorderState.ERROR);
+        this._emitLevel(0);
         reject(err);
       }
     });
@@ -152,15 +237,33 @@ export class MicrophoneRecorder {
     }
     this._cleanupStream();
     this.audioChunks = [];
+    this._emitLevel(0);
     this._transitionTo(RecorderState.IDLE);
   }
 
   _cleanupStream() {
+    if (this._levelInterval) {
+      clearInterval(this._levelInterval);
+      this._levelInterval = null;
+    }
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.disconnect();
+      } catch (e) {}
+      this.sourceNode = null;
+    }
+    if (this.audioContext) {
+      try {
+        this.audioContext.close();
+      } catch (e) {}
+      this.audioContext = null;
+    }
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach((track) => track.stop());
       this.mediaStream = null;
     }
     this.mediaRecorder = null;
+    this.analyser = null;
   }
 
   _transitionTo(nextState) {
@@ -176,9 +279,24 @@ export class MicrophoneRecorder {
     }
   }
 
+  _emitLevel(level) {
+    for (const listener of this._levelListeners) {
+      try {
+        listener(level);
+      } catch (e) {
+        console.error('Recorder level listener error:', e);
+      }
+    }
+  }
+
   onStateChange(callback) {
     this._stateListeners.add(callback);
     return () => this._stateListeners.delete(callback);
+  }
+
+  onLevelChange(callback) {
+    this._levelListeners.add(callback);
+    return () => this._levelListeners.delete(callback);
   }
 }
 

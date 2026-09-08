@@ -136,6 +136,38 @@ export class AudioPlaybackManager {
   }
 
   /**
+   * Prime browser media playback during a user gesture so delayed TTS audio
+   * is not blocked by autoplay policy after the network request completes.
+   */
+  primePlayback() {
+    if (!this.audio) return;
+
+    const previousSrc = this.audio.src;
+    const wasMuted = this.audio.muted;
+    this.audio.muted = true;
+    this.audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
+
+    const primePromise = this.audio.play();
+    if (primePromise && typeof primePromise.then === 'function') {
+      primePromise
+        .then(() => {
+          this.audio.pause();
+          this.audio.currentTime = 0;
+          this.audio.src = previousSrc;
+          this.audio.muted = wasMuted;
+        })
+        .catch(() => {
+          this.audio.src = previousSrc;
+          this.audio.muted = wasMuted;
+        });
+    } else {
+      this.audio.pause();
+      this.audio.src = previousSrc;
+      this.audio.muted = wasMuted;
+    }
+  }
+
+  /**
    * Monotonically advance active turn ID.
    * Immediately invalidates and stops any audio associated with older turns.
    * @param {number} turnId 
