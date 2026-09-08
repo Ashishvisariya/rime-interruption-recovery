@@ -435,6 +435,21 @@ export default function App() {
     }
   };
 
+  const updateSessionTitleIfFirst = (sessId, promptText) => {
+    if (!sessId || !promptText || !promptText.trim()) return;
+    const cleanPrompt = promptText.trim();
+    const titleText = cleanPrompt.slice(0, 26) + (cleanPrompt.length > 26 ? '...' : '');
+
+    setSessions((prevSessions) =>
+      prevSessions.map((s) => {
+        if (s.id === sessId && (s.title.startsWith('Voice Session #') || s.title.startsWith('New Chat'))) {
+          return { ...s, title: titleText };
+        }
+        return s;
+      })
+    );
+  };
+
   // Handler: Push-to-Talk Recording
   const handleToggleRecord = async () => {
     if (isRecording) {
@@ -466,6 +481,7 @@ export default function App() {
         const turnId = headers.turnId;
         setActiveTurnId(turnId);
         defaultPlaybackManager.setActiveTurn(turnId);
+        updateSessionTitleIfFirst(sessionId, headers.userTranscript);
 
         setConversationTurns((prev) => [
           ...prev,
@@ -554,6 +570,7 @@ export default function App() {
       const turnId = headers.turnId;
       setActiveTurnId(turnId);
       defaultPlaybackManager.setActiveTurn(turnId);
+      updateSessionTitleIfFirst(sessionId, promptToSend);
 
       setConversationTurns((prev) => [
         ...prev,
