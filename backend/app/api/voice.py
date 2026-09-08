@@ -5,9 +5,25 @@ turn state transitions, context retrieval, STT, LLM, TTS dispatch,
 and End-to-End Voice Agent Orchestration in Phase 10.
 """
 
+import asyncio
 import time
+import urllib.parse
 from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
+
+
+def _safe_header_value(text: Optional[str]) -> str:
+    """Sanitize header string to guarantee single-line ASCII safety for uvicorn HTTP headers."""
+    if not text:
+        return ""
+    clean_text = str(text).replace("\r\n", " ").replace("\n", " ").replace("\r", " ").strip()
+    try:
+        clean_text.encode("ascii")
+        return clean_text
+    except UnicodeEncodeError:
+        return urllib.parse.quote(clean_text)
+
+
 from pydantic import BaseModel, Field
 
 from backend.app.core.session import default_session_store
@@ -427,6 +443,11 @@ async def respond_with_llm(request: LLMRequest) -> LLMResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(e),
         )
+    except asyncio.CancelledError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="LLM generation was cancelled due to user interruption.",
+        )
 
     # Post-generation turn validation (rejects stale response if turn changed in-flight)
     if session and request.turn_id is not None:
@@ -526,19 +547,24 @@ async def process_agent_audio(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except asyncio.CancelledError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Turn processing was cancelled due to user interruption.",
+        )
 
     media_type = default_rime_service._resolve_accept_header(result.tts_metadata.audio_format)
     headers = {
-        "X-Session-ID": result.session_id,
+        "X-Session-ID": _safe_header_value(result.session_id),
         "X-Turn-ID": str(result.turn_id),
-        "X-User-Transcript": result.user_prompt,
-        "X-Assistant-Response": result.assistant_text,
-        "X-LLM-Provider": result.llm_metadata.get("provider", "groq"),
-        "X-LLM-Model": result.llm_metadata.get("model", "qwen/qwen3.6-27b"),
-        "X-Provider": result.tts_metadata.provider,
-        "X-Model-ID": result.tts_metadata.model_id,
-        "X-Speaker": result.tts_metadata.speaker,
-        "X-Audio-Format": result.tts_metadata.audio_format,
+        "X-User-Transcript": _safe_header_value(result.user_prompt),
+        "X-Assistant-Response": _safe_header_value(result.assistant_text),
+        "X-LLM-Provider": _safe_header_value(result.llm_metadata.get("provider", "groq")),
+        "X-LLM-Model": _safe_header_value(result.llm_metadata.get("model", "qwen/qwen3.6-27b")),
+        "X-Provider": _safe_header_value(result.tts_metadata.provider),
+        "X-Model-ID": _safe_header_value(result.tts_metadata.model_id),
+        "X-Speaker": _safe_header_value(result.tts_metadata.speaker),
+        "X-Audio-Format": _safe_header_value(result.tts_metadata.audio_format),
         "X-Audio-Bytes-Length": str(len(result.audio_bytes)),
         "X-Pipeline-Latency-Ms": str(result.latency_ms),
     }
@@ -598,19 +624,24 @@ async def process_agent_text(request: VoiceAgentTextRequest) -> Response:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except asyncio.CancelledError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Turn processing was cancelled due to user interruption.",
+        )
 
     media_type = default_rime_service._resolve_accept_header(result.tts_metadata.audio_format)
     headers = {
-        "X-Session-ID": result.session_id,
+        "X-Session-ID": _safe_header_value(result.session_id),
         "X-Turn-ID": str(result.turn_id),
-        "X-User-Transcript": result.user_prompt,
-        "X-Assistant-Response": result.assistant_text,
-        "X-LLM-Provider": result.llm_metadata.get("provider", "groq"),
-        "X-LLM-Model": result.llm_metadata.get("model", "qwen/qwen3.6-27b"),
-        "X-Provider": result.tts_metadata.provider,
-        "X-Model-ID": result.tts_metadata.model_id,
-        "X-Speaker": result.tts_metadata.speaker,
-        "X-Audio-Format": result.tts_metadata.audio_format,
+        "X-User-Transcript": _safe_header_value(result.user_prompt),
+        "X-Assistant-Response": _safe_header_value(result.assistant_text),
+        "X-LLM-Provider": _safe_header_value(result.llm_metadata.get("provider", "groq")),
+        "X-LLM-Model": _safe_header_value(result.llm_metadata.get("model", "qwen/qwen3.6-27b")),
+        "X-Provider": _safe_header_value(result.tts_metadata.provider),
+        "X-Model-ID": _safe_header_value(result.tts_metadata.model_id),
+        "X-Speaker": _safe_header_value(result.tts_metadata.speaker),
+        "X-Audio-Format": _safe_header_value(result.tts_metadata.audio_format),
         "X-Audio-Bytes-Length": str(len(result.audio_bytes)),
         "X-Pipeline-Latency-Ms": str(result.latency_ms),
     }
