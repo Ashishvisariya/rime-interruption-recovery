@@ -1,18 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { defaultPlaybackManager, PlaybackState } from './services/audio.js';
+import { defaultPlaybackManager, PlaybackState, AudioEventType } from './services/audio.js';
 import { defaultApiClient } from './services/api.js';
 import { defaultRecorder, RecorderState } from './services/recorder.js';
-import { defaultVAD, VADEventType } from './services/vad.js';
+import { defaultVAD, VADEventType, VADState } from './services/vad.js';
 import { defaultWebSocketClient, WebSocketState, ServerEventType } from './services/websocket.js';
-
-import Sidebar from './components/Sidebar.jsx';
-import ChatThread from './components/ChatThread.jsx';
-import ChatInput from './components/ChatInput.jsx';
 import SpeakingIndicator from './components/SpeakingIndicator.jsx';
-import StatusChips from './components/StatusChips.jsx';
-import { IconAlert } from './components/Icons.jsx';
-
-// Dev mode components
 import Status from './components/Status.jsx';
 import VoiceButton from './components/VoiceButton.jsx';
 import Transcript from './components/Transcript.jsx';
@@ -25,7 +17,6 @@ export const AgentState = {
   SYNTHESIZING: 'SYNTHESIZING',
   PLAYING: 'PLAYING',
   INTERRUPTING: 'INTERRUPTING',
-  RECOVERING: 'RECOVERING',
   ERROR: 'ERROR',
 };
 
@@ -39,7 +30,7 @@ export default function App() {
   const [wsState, setWsState] = useState(WebSocketState.DISCONNECTED);
   const [currentAudio, setCurrentAudio] = useState(null);
   const [events, setEvents] = useState([]);
-  const [ttsText, setTtsText] = useState('');
+  const [ttsText, setTtsText] = useState('What is the weather like in Delhi?');
   const [conversationTurns, setConversationTurns] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -49,9 +40,6 @@ export default function App() {
   const [interruptionInfo, setInterruptionInfo] = useState(null);
   const [showBenchmarkCard, setShowBenchmarkCard] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
-  const [isDevMode, setIsDevMode] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [sessions, setSessions] = useState([]);
 
   // Sync VAD callbacks with current React state
   useEffect(() => {
@@ -60,13 +48,13 @@ export default function App() {
   }, [agentState, sessionId, activeTurnId]);
 
   // Connect / Reconnect Helper
-  const connectSession = async (explicitSessionId = null) => {
+  const connectSession = async () => {
     try {
       setErrorMessage('');
       const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json()).catch(() => null);
       setBackendStatus(rootRes);
 
-      let targetSessionId = explicitSessionId || sessionId;
+      let targetSessionId = sessionId;
       let targetTurnId = activeTurnId;
 
       if (!targetSessionId) {
@@ -75,24 +63,19 @@ export default function App() {
         targetTurnId = sess.active_turn_id;
         setSessionId(sess.session_id);
         setActiveTurnId(sess.active_turn_id);
-
-        setSessions((prev) => [
-          { id: sess.session_id, title: `Voice Session #${sess.session_id.slice(0, 8)}`, date: 'Active' },
-          ...prev,
-        ]);
       }
 
       defaultPlaybackManager.setSession(targetSessionId, targetTurnId);
       defaultWebSocketClient.connect(targetSessionId);
-      setAgentState(AgentState.IDLE);
     } catch (err) {
       console.error('Session connection error:', err);
       setErrorMessage(`Connection Error: Unable to connect to backend service. (${err.message})`);
     }
   };
 
-  // Initialize session and subscribe to services
+  // Initialize session and subscribe to Playback Manager, Recorder, VAD, and WebSocket events
   useEffect(() => {
+    // 1. Playback state listener
     const unsubState = defaultPlaybackManager.onStateChange((state, prevState, audio) => {
       setPlaybackState(state);
       setCurrentAudio(audio);
@@ -103,10 +86,12 @@ export default function App() {
       }
     });
 
+    // 2. Structured audio events
     const unsubEvents = defaultPlaybackManager.onEvent((evt) => {
       setEvents((prev) => [evt, ...prev.slice(0, 59)]);
     });
 
+    // 3. Microphone recorder state
     const unsubRecorder = defaultRecorder.onStateChange((state) => {
       const rec = state === RecorderState.RECORDING;
       setIsRecording(rec);
@@ -120,11 +105,13 @@ export default function App() {
       }
     });
 
+    // 4. VAD real-time barge-in listener
     const unsubVAD = defaultVAD.onEvent(async (evt) => {
       if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
         const t_detection = Date.now();
 
-        defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
+        // Immediately halt active Rime audio and advance client turn
+        defaultPlaybackManager.stopCurrentAudio('interruption_barge_in');
         defaultPlaybackManager.setActiveTurn(evt.newTurnId);
 
         const t_stop = Date.now();
@@ -139,6 +126,7 @@ export default function App() {
           timestamp: t_detection,
         });
 
+        // Mark previously active turn in conversation history as INTERRUPTED
         setConversationTurns((prev) =>
           prev.map((t) =>
             t.turnId === evt.previousTurnId
@@ -181,6 +169,7 @@ export default function App() {
           ...prev.slice(0, 59),
         ]);
 
+        // Send real-time interruption cue over WebSocket
         defaultWebSocketClient.sendInterruption({
           previousTurnId: evt.previousTurnId,
           newTurnId: evt.newTurnId,
@@ -226,6 +215,7 @@ export default function App() {
       }
     });
 
+    // 5. WebSocket events & state
     const unsubWsState = defaultWebSocketClient.onStateChange((state) => {
       setWsState(state);
       if (state === WebSocketState.CONNECTED) {
@@ -258,25 +248,54 @@ export default function App() {
       } else if (evt.event_type === ServerEventType.AUDIO_STARTED) {
         setAgentState(AgentState.PLAYING);
       } else if (evt.event_type === ServerEventType.AUDIO_DATA) {
-        if (evt.data?.audio_chunk && evt.turn_id) {
-          defaultPlaybackManager.queueAudioChunk(evt.turn_id, evt.data.audio_chunk);
+        const audioB64 = evt.data?.audio_b64;
+        if (audioB64 && evt.turn_id === defaultPlaybackManager.activeTurnId) {
+          try {
+            const byteCharacters = atob(audioB64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+
+            setAgentState(AgentState.PLAYING);
+            await defaultPlaybackManager.playAudio({
+              sessionId: evt.session_id,
+              turnId: evt.turn_id,
+              audioSource: blob,
+              metadata: {
+                speaker: evt.data?.speaker || 'celeste',
+                modelId: evt.data?.model_id || 'coda',
+                format: evt.data?.format || 'mp3',
+                bytes: evt.data?.bytes_length || byteArray.length,
+              },
+            });
+          } catch (err) {
+            console.error('Error decoding/playing WebSocket audio data:', err);
+          }
         }
       } else if (evt.event_type === ServerEventType.AUDIO_STOP) {
-        defaultPlaybackManager.stopCurrentAudio('server_audio_stop');
-        setAgentState(AgentState.INTERRUPTING);
+        defaultPlaybackManager.stopCurrentAudio(evt.data?.reason || 'ws_audio_stop');
+        setAgentState(AgentState.LISTENING);
       } else if (evt.event_type === ServerEventType.TURN_INTERRUPTED) {
-        if (evt.data?.new_turn_id) {
-          setActiveTurnId(evt.data.new_turn_id);
-          defaultPlaybackManager.setActiveTurn(evt.data.new_turn_id);
+        const newId = evt.data?.new_turn_id;
+        if (newId) {
+          setPreviousTurnId(evt.turn_id || activeTurnId);
+          setPreviousTurnStatus('INTERRUPTED');
+          setActiveTurnId(newId);
+          defaultPlaybackManager.setActiveTurn(newId);
         }
-        setAgentState(AgentState.RECOVERING);
+        setAgentState(AgentState.LISTENING);
       } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
-        if (evt.data?.assistant_response && evt.turn_id) {
+        if (evt.data?.assistant_response) {
+          setPreviousTurnId(evt.turn_id);
+          setPreviousTurnStatus('COMPLETED');
           setConversationTurns((prev) => [
             ...prev,
             {
               turnId: evt.turn_id,
-              userPrompt: evt.data?.user_prompt || ttsText,
+              userPrompt: evt.data.user_prompt || ttsText,
               assistantResponse: evt.data.assistant_response,
               latencyMs: evt.data.latency_ms,
               speaker: evt.data?.speaker || 'celeste',
@@ -311,30 +330,7 @@ export default function App() {
     setTtsText('Search for a flight from New York to Tokyo.');
   };
 
-  // Handler: Start a new conversation session
-  const handleNewChat = async () => {
-    setConversationTurns([]);
-    setTtsText('');
-    setErrorMessage('');
-    const sess = await defaultApiClient.createSession();
-    setSessionId(sess.session_id);
-    setActiveTurnId(sess.active_turn_id);
-    defaultPlaybackManager.setSession(sess.session_id, sess.active_turn_id);
-    defaultWebSocketClient.connect(sess.session_id);
-
-    setSessions((prev) => [
-      { id: sess.session_id, title: `Voice Session #${sess.session_id.slice(0, 8)}`, date: 'Just now' },
-      ...prev,
-    ]);
-  };
-
-  const handleSelectSession = (id) => {
-    setSessionId(id);
-    defaultPlaybackManager.setSession(id, 1);
-    defaultWebSocketClient.connect(id);
-  };
-
-  // Handler: Advance monotonic turn
+  // Handler: Advance monotonic turn manually
   const handleAdvanceTurn = async () => {
     if (!sessionId) return;
     try {
@@ -404,7 +400,7 @@ export default function App() {
             status: 'COMPLETED',
           },
         ]);
-        setTtsText('');
+        setTtsText(headers.assistantResponse);
 
         setEvents((prev) => [
           {
@@ -438,15 +434,9 @@ export default function App() {
           },
         });
       } catch (err) {
-        if (err.status === 409 || err.message?.includes('cancelled') || err.message?.includes('superseded')) {
-          console.log('Turn audio processing cleanly interrupted:', err.message);
-          setAgentState(AgentState.LISTENING);
-          setErrorMessage('');
-        } else {
-          console.error('Voice Agent orchestration error:', err);
-          setAgentState(AgentState.ERROR);
-          setErrorMessage(`Voice Agent Error: ${err.message}`);
-        }
+        console.error('Voice Agent orchestration error:', err);
+        setAgentState(AgentState.ERROR);
+        setErrorMessage(`Voice Agent Error: ${err.message}`);
       } finally {
         setIsProcessing(false);
       }
@@ -462,9 +452,8 @@ export default function App() {
   };
 
   // Handler: Text-based Voice Agent Pipeline
-  const handleProcessText = async (customPrompt = null) => {
-    const promptToSend = typeof customPrompt === 'string' ? customPrompt : ttsText;
-    if (!sessionId || !promptToSend.trim()) return;
+  const handleProcessText = async () => {
+    if (!sessionId || !ttsText.trim()) return;
 
     setIsLoading(true);
     setIsProcessing(true);
@@ -472,7 +461,7 @@ export default function App() {
 
     try {
       const { blob, headers } = await defaultApiClient.processAgentText({
-        text: promptToSend,
+        text: ttsText,
         sessionId,
       });
 
@@ -484,7 +473,7 @@ export default function App() {
         ...prev,
         {
           turnId,
-          userPrompt: promptToSend,
+          userPrompt: ttsText,
           assistantResponse: headers.assistantResponse,
           speaker: headers.speaker || 'celeste',
           modelId: headers.modelId || 'coda',
@@ -492,7 +481,6 @@ export default function App() {
           status: 'COMPLETED',
         },
       ]);
-      setTtsText('');
 
       setEvents((prev) => [
         {
@@ -502,7 +490,7 @@ export default function App() {
           turn_id: turnId,
           state: playbackState,
           details: {
-            prompt: promptToSend,
+            prompt: ttsText,
             response: headers.assistantResponse,
             llm_model: headers.llmModel,
             speaker: headers.speaker,
@@ -526,28 +514,22 @@ export default function App() {
         },
       });
     } catch (err) {
-      if (err.status === 409 || err.message?.includes('cancelled') || err.message?.includes('superseded')) {
-        console.log('Turn text processing cleanly interrupted:', err.message);
-        setAgentState(AgentState.IDLE);
-        setErrorMessage('');
-      } else {
-        console.error('Agent text processing error:', err);
-        setAgentState(AgentState.ERROR);
-        setErrorMessage(`Voice Agent Error: ${err.message}`);
-      }
+      console.error('Agent text processing error:', err);
+      setAgentState(AgentState.ERROR);
+      setErrorMessage(`Voice Agent Error: ${err.message}`);
     } finally {
       setIsLoading(false);
       setIsProcessing(false);
     }
   };
 
-  // Handler: Stop Active Audio Output
+  // Handler: Immediate Stop Audio
   const handleStopAudio = () => {
-    defaultPlaybackManager.stopCurrentAudio('user_click_stop');
+    defaultPlaybackManager.stopCurrentAudio('user_manual_stop');
     setAgentState(AgentState.IDLE);
   };
 
-  // Handler: Manual Barge-In Interruption
+  // Handler: Manual Barge-In Trigger
   const handleBargeIn = async () => {
     if (!sessionId) return;
     const t_detection = Date.now();
@@ -555,6 +537,7 @@ export default function App() {
     const prevAgentState = agentState;
     const nextTurnId = prevTurnId + 1;
 
+    // Immediately stop active audio and advance client active turn
     defaultPlaybackManager.stopCurrentAudio('manual_barge_in');
     defaultPlaybackManager.setActiveTurn(nextTurnId);
 
@@ -661,196 +644,132 @@ export default function App() {
     }
   };
 
-  const handleSelectQuickPrompt = (promptText) => {
-    setTtsText(promptText);
-    handleProcessText(promptText);
-  };
-
   return (
-    <div className="modern-app-layout">
-      {/* 1. Left Collapsible Sidebar (ChatGPT / Claude Style) */}
-      <Sidebar
-        sessions={sessions}
-        activeSessionId={sessionId}
-        onSelectSession={handleSelectSession}
-        onNewChat={handleNewChat}
-        isDevMode={isDevMode}
-        onToggleDevMode={() => setIsDevMode(!isDevMode)}
-        isOpen={isSidebarOpen}
-        onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-      />
+    <div className="app-container">
+      <header className="app-header">
+        <div className="logo-badge">
+          <span className="logo-dot"></span>
+          <h1>Voice AI Assistant with Interruption &amp; Recovery</h1>
+        </div>
+        <p className="app-tagline">
+          Ultra-Low Latency Conversational Voice &bull; Rime Labs TTS &bull; Real-Time Interruption &amp; Recovery
+        </p>
+      </header>
 
-      {/* 2. Main Chat Workspace */}
-      <div className="chat-workspace">
-        {/* Top Header Bar */}
-        <header className="chat-top-header">
-          <div className="header-left">
-            {!isSidebarOpen && (
-              <button
-                type="button"
-                className="btn-open-sidebar"
-                onClick={() => setIsSidebarOpen(true)}
-                title="Expand Sidebar"
-              >
-                ☰
-              </button>
-            )}
-            <h1 className="chat-app-title">Voice AI Assistant</h1>
+      {/* Disconnect or Error Notice Banner */}
+      {errorMessage && (
+        <div className="alert-banner alert-error" role="alert">
+          <span className="alert-icon">⚠️</span>
+          <span className="alert-text">{errorMessage}</span>
+          <button
+            type="button"
+            className="btn-tiny btn-alert-action"
+            onClick={connectSession}
+          >
+            Reconnect
+          </button>
+        </div>
+      )}
+
+      {/* Interruption Alert Banner */}
+      {interruptionInfo && agentState === AgentState.INTERRUPTING && (
+        <div className="alert-banner alert-interruption" role="status">
+          <span className="alert-icon">⚡</span>
+          <span className="alert-text">
+            <strong>Barge-In Detected:</strong> Turn #{interruptionInfo.previousTurnId} halted promptly ({interruptionInfo.stopLatencyMs.toFixed(2)} ms). Obsolete tasks cancelled. Turn #{interruptionInfo.newTurnId} is now authoritative.
+          </span>
+        </div>
+      )}
+
+      {/* Verified Empirical Benchmark Card */}
+      <div className="benchmark-summary-card glass-card">
+        <div className="benchmark-header" onClick={() => setShowBenchmarkCard(!showBenchmarkCard)}>
+          <div className="benchmark-title-row">
+            <span className="benchmark-badge">VERIFIED BENCHMARK EVIDENCE</span>
+            <span className="benchmark-claim">20/20 Trials Passed &bull; 0 Stale Speech Leaks &bull; 100% Recovery</span>
           </div>
+          <button type="button" className="btn-tiny btn-toggle-card">
+            {showBenchmarkCard ? 'Hide Details ▲' : 'Show Details ▼'}
+          </button>
+        </div>
 
-          <div className="header-center">
-            {/* Audio Waveform Banner */}
-            <SpeakingIndicator
-              state={playbackState}
-              agentState={agentState}
-              currentAudio={currentAudio}
-              interruptionInfo={interruptionInfo}
-            />
-          </div>
-
-          <div className="header-right">
-            <StatusChips
-              agentState={agentState}
-              playbackState={playbackState}
-              wsState={wsState}
-              onReconnect={() => connectSession()}
-            />
-          </div>
-        </header>
-
-        {/* Notice Error Banner */}
-        {errorMessage && (
-          <div className="alert-banner alert-error" role="alert">
-            <span className="alert-icon"><IconAlert size={16} color="#ef4444" /></span>
-            <span className="alert-text">{errorMessage}</span>
-            <button
-              type="button"
-              className="btn-tiny btn-alert-action"
-              onClick={() => connectSession()}
-            >
-              Reconnect
-            </button>
+        {showBenchmarkCard && (
+          <div className="benchmark-stats-grid">
+            <div className="benchmark-stat">
+              <span className="stat-label">Recovery Rate</span>
+              <span className="stat-val highlight-green">100.0% (20/20)</span>
+            </div>
+            <div className="benchmark-stat">
+              <span className="stat-label">Latest-Turn Correctness</span>
+              <span className="stat-val highlight-green">100.0% (20/20)</span>
+            </div>
+            <div className="benchmark-stat">
+              <span className="stat-label">Stale Responses Spoken</span>
+              <span className="stat-val highlight-green">0 leaks</span>
+            </div>
+            <div className="benchmark-stat">
+              <span className="stat-label">Stale Audio to Playback</span>
+              <span className="stat-val highlight-green">0 events</span>
+            </div>
+            <div className="benchmark-stat stat-wide">
+              <span className="stat-label">Application-level interruption-to-playback-stop latency</span>
+              <span className="stat-val mono">Mean: 0.116 ms &bull; P95: 0.181 ms (Min: 0.068 ms, Max: 0.196 ms)</span>
+            </div>
           </div>
         )}
+      </div>
 
-        {/* Developer Mode Panels */}
-        {isDevMode && (
-          <div className="dev-mode-drawer glass-card">
-            <div className="dev-drawer-header">
-              <span className="dev-badge">DEVELOPER DEBUG & BENCHMARK MODE</span>
-              <button type="button" className="btn-tiny" onClick={() => setIsDevMode(false)}>Close ✖</button>
-            </div>
-
-            {/* Benchmark Summary Card */}
-            <div className="benchmark-summary-card">
-              <div className="benchmark-header" onClick={() => setShowBenchmarkCard(!showBenchmarkCard)}>
-                <div className="benchmark-title-row">
-                  <span className="benchmark-badge">VERIFIED BENCHMARK EVIDENCE</span>
-                  <span className="benchmark-claim">20/20 Trials Passed &bull; 0 Stale Speech Leaks &bull; 100% Recovery</span>
-                </div>
-                <button type="button" className="btn-tiny btn-toggle-card">
-                  {showBenchmarkCard ? 'Hide Details ▲' : 'Show Details ▼'}
-                </button>
-              </div>
-
-              {showBenchmarkCard && (
-                <div className="benchmark-stats-grid">
-                  <div className="benchmark-stat">
-                    <span className="stat-label">Recovery Rate</span>
-                    <span className="stat-val highlight-green">100.0% (20/20)</span>
-                  </div>
-                  <div className="benchmark-stat">
-                    <span className="stat-label">Latest-Turn Correctness</span>
-                    <span className="stat-val highlight-green">100.0% (20/20)</span>
-                  </div>
-                  <div className="benchmark-stat">
-                    <span className="stat-label">Stale Responses Spoken</span>
-                    <span className="stat-val highlight-green">0 leaks</span>
-                  </div>
-                  <div className="benchmark-stat">
-                    <span className="stat-label">Stale Audio to Playback</span>
-                    <span className="stat-val highlight-green">0 events</span>
-                  </div>
-                  <div className="benchmark-stat stat-wide">
-                    <span className="stat-label">Application-level interruption latency</span>
-                    <span className="stat-val mono">Mean: 0.116 ms &bull; P95: 0.181 ms (Min: 0.068 ms, Max: 0.196 ms)</span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Technical System Status */}
-            <Status
-              sessionId={sessionId}
-              activeTurnId={activeTurnId}
-              previousTurnId={previousTurnId}
-              previousTurnStatus={previousTurnStatus}
-              state={playbackState}
-              agentState={agentState}
-              wsState={wsState}
-              metadata={currentAudio?.metadata}
-              backendStatus={backendStatus}
-              onReconnect={() => connectSession()}
-            />
-
-            {/* Dev Manual Controls */}
-            <VoiceButton
-              state={playbackState}
-              agentState={agentState}
-              onAdvanceTurn={handleAdvanceTurn}
-              onProcessText={() => handleProcessText()}
-              onStop={handleStopAudio}
-              onToggleRecord={handleToggleRecord}
-              onBargeIn={handleBargeIn}
-              onToggleVAD={handleToggleVAD}
-              isRecording={isRecording}
-              isProcessing={isProcessing}
-              isLoading={isLoading}
-              isVADActive={isVADActive}
-              activeTurnId={activeTurnId}
-              isDevMode={true}
-            />
-
-            {/* Real-time Audit Log */}
-            <Transcript
-              events={events}
-              text={ttsText}
-              setText={setTtsText}
-              conversationTurns={conversationTurns}
-              activeTurnId={activeTurnId}
-              onLoadNormalDemo={handleLoadNormalDemo}
-              onLoadStressDemo={handleLoadStressDemo}
-            />
-          </div>
-        )}
-
-        {/* 3. Main Scrollable Chat Thread Stream */}
-        <ChatThread
-          conversationTurns={conversationTurns}
-          currentTranscript={ttsText}
-          isListening={isRecording || agentState === AgentState.LISTENING}
-          isProcessing={isProcessing || agentState === AgentState.THINKING || agentState === AgentState.SYNTHESIZING}
+      <main className="app-main">
+        <SpeakingIndicator
+          state={playbackState}
           agentState={agentState}
-          activeTurnId={activeTurnId}
+          currentAudio={currentAudio}
+          interruptionInfo={interruptionInfo}
         />
 
-        {/* 4. Bottom Modern Floating Input Bar */}
-        <ChatInput
-          text={ttsText}
-          setText={setTtsText}
-          onSend={handleProcessText}
+        <Status
+          sessionId={sessionId}
+          activeTurnId={activeTurnId}
+          previousTurnId={previousTurnId}
+          previousTurnStatus={previousTurnStatus}
+          state={playbackState}
+          agentState={agentState}
+          wsState={wsState}
+          metadata={currentAudio?.metadata}
+          backendStatus={backendStatus}
+          onReconnect={connectSession}
+        />
+
+        <VoiceButton
+          state={playbackState}
+          agentState={agentState}
+          onAdvanceTurn={handleAdvanceTurn}
+          onProcessText={handleProcessText}
+          onStop={handleStopAudio}
           onToggleRecord={handleToggleRecord}
-          onStopAudio={handleStopAudio}
+          onBargeIn={handleBargeIn}
           onToggleVAD={handleToggleVAD}
           isRecording={isRecording}
           isProcessing={isProcessing}
           isLoading={isLoading}
           isVADActive={isVADActive}
-          playbackState={playbackState}
-          agentState={agentState}
-          onSelectQuickPrompt={handleSelectQuickPrompt}
+          activeTurnId={activeTurnId}
         />
-      </div>
+
+        <Transcript
+          events={events}
+          text={ttsText}
+          setText={setTtsText}
+          conversationTurns={conversationTurns}
+          activeTurnId={activeTurnId}
+          onLoadNormalDemo={handleLoadNormalDemo}
+          onLoadStressDemo={handleLoadStressDemo}
+        />
+      </main>
+
+      <footer className="app-footer">
+        <span>DataForge 2026 Rime Hackathon &bull; Phase 16 Demo &amp; UX Hardening &bull; Rime TTS (<span className="mono">coda</span> / <span className="mono">celeste</span>)</span>
+      </footer>
     </div>
   );
 }
