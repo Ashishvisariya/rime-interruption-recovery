@@ -343,10 +343,11 @@ def test_concurrent_turn_and_stale_completion_race(fresh_manager):
     t1 = fresh_manager.create_turn("sess_race", "Slow tool query for Tokyo flights")
 
     results = {"worker_a_completed": None, "worker_b_turn": None}
+    barge_in_done = threading.Event()
 
     def worker_a_late_result():
-        # Simulates late arrival of Turn 1 completion
-        time.sleep(0.02)
+        # Simulates late arrival of Turn 1 completion after Turn 2 is active
+        barge_in_done.wait(timeout=2.0)
         res = fresh_manager.complete_turn(
             "sess_race",
             t1,
@@ -359,6 +360,7 @@ def test_concurrent_turn_and_stale_completion_race(fresh_manager):
         time.sleep(0.01)
         t2 = fresh_manager.create_turn("sess_race", "Change flight to London")
         results["worker_b_turn"] = t2
+        barge_in_done.set()
 
     th_a = threading.Thread(target=worker_a_late_result)
     th_b = threading.Thread(target=worker_b_barge_in)

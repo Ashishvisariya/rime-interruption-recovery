@@ -1,10 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { defaultPlaybackManager, PlaybackState, AudioEventType } from './services/audio.js';
+import { defaultPlaybackManager, PlaybackState } from './services/audio.js';
 import { defaultApiClient } from './services/api.js';
 import { defaultRecorder, RecorderState } from './services/recorder.js';
-import { defaultVAD, VADEventType, VADState } from './services/vad.js';
+import { defaultVAD, VADEventType } from './services/vad.js';
 import { defaultWebSocketClient, WebSocketState, ServerEventType } from './services/websocket.js';
+
+import Sidebar from './components/Sidebar.jsx';
+import ChatThread from './components/ChatThread.jsx';
+import ChatInput from './components/ChatInput.jsx';
 import SpeakingIndicator from './components/SpeakingIndicator.jsx';
+import StatusChips from './components/StatusChips.jsx';
+import { IconAlert } from './components/Icons.jsx';
+
+// Dev mode components
 import Status from './components/Status.jsx';
 import VoiceButton from './components/VoiceButton.jsx';
 import Transcript from './components/Transcript.jsx';
@@ -17,11 +25,44 @@ export const AgentState = {
   SYNTHESIZING: 'SYNTHESIZING',
   PLAYING: 'PLAYING',
   INTERRUPTING: 'INTERRUPTING',
+  RECOVERING: 'RECOVERING',
   ERROR: 'ERROR',
 };
 
+import { sanitizeFinalResponse } from './services/response_sanitizer.js';
+
 export default function App() {
-  const [sessionId, setSessionId] = useState('');
+  const [sessions, setSessions] = useState(() => {
+    try {
+      const saved = localStorage.getItem('rime_voice_sessions');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [sessionId, setSessionId] = useState(() => {
+    try {
+      return localStorage.getItem('rime_voice_active_session') || '';
+    } catch (e) {
+      return '';
+    }
+  });
+
+  const [conversationTurns, setConversationTurns] = useState(() => {
+    try {
+      const activeId = localStorage.getItem('rime_voice_active_session');
+      const saved = localStorage.getItem('rime_voice_chats');
+      if (activeId && saved) {
+        const chatsMap = JSON.parse(saved);
+        return chatsMap[activeId] || [];
+      }
+    } catch (e) {
+      return [];
+    }
+    return [];
+  });
+
   const [activeTurnId, setActiveTurnId] = useState(0);
   const [previousTurnId, setPreviousTurnId] = useState(0);
   const [previousTurnStatus, setPreviousTurnStatus] = useState('');
@@ -30,8 +71,7 @@ export default function App() {
   const [wsState, setWsState] = useState(WebSocketState.DISCONNECTED);
   const [currentAudio, setCurrentAudio] = useState(null);
   const [events, setEvents] = useState([]);
-  const [ttsText, setTtsText] = useState('What is the weather like in Delhi?');
-  const [conversationTurns, setConversationTurns] = useState([]);
+  const [ttsText, setTtsText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -40,6 +80,108 @@ export default function App() {
   const [interruptionInfo, setInterruptionInfo] = useState(null);
   const [showBenchmarkCard, setShowBenchmarkCard] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
+  const [isDevMode, setIsDevMode] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  // Audio device state & microphone testing
+  const [micLevel, setMicLevel] = useState(0);
+  const [audioDevices, setAudioDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(() => localStorage.getItem('rime_mic_device') || '');
+  const [isTestingMic, setIsTestingMic] = useState(false);
+  const [testMicLevel, setTestMicLevel] = useState(0);
+
+  const testStreamRef = React.useRef(null);
+  const testIntervalRef = React.useRef(null);
+  const testCtxRef = React.useRef(null);
+
+  // Enumerate input devices on mount
+  useEffect(() => {
+    defaultRecorder.getAudioDevices().then((devs) => {
+      if (devs && devs.length > 0) {
+        setAudioDevices(devs);
+      }
+    });
+  }, []);
+
+  // Live Microphone Test Handler
+  const handleTestMic = async () => {
+    if (isTestingMic) {
+      if (testIntervalRef.current) clearInterval(testIntervalRef.current);
+      if (testStreamRef.current) testStreamRef.current.getTracks().forEach((t) => t.stop());
+      if (testCtxRef.current) try { testCtxRef.current.close(); } catch (e) {}
+      setIsTestingMic(false);
+      setTestMicLevel(0);
+      return;
+    }
+
+    try {
+      setErrorMessage('');
+      setIsTestingMic(true);
+      const audioConstraints = selectedDeviceId
+        ? { deviceId: { exact: selectedDeviceId } }
+        : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      testStreamRef.current = stream;
+
+      // Refresh devices with actual human labels now that permission is active
+      const devs = await defaultRecorder.getAudioDevices();
+      setAudioDevices(devs);
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      testCtxRef.current = ctx;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      const src = ctx.createMediaStreamSource(stream);
+      src.connect(analyser);
+      const data = new Float32Array(analyser.fftSize);
+
+      testIntervalRef.current = setInterval(() => {
+        analyser.getFloatTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+        const rms = Math.sqrt(sum / data.length);
+        setTestMicLevel(rms);
+      }, 50);
+    } catch (err) {
+      setIsTestingMic(false);
+      setErrorMessage(`Microphone test failed: ${err.message}`);
+    }
+  };
+
+  // Sync Sessions to LocalStorage
+  useEffect(() => {
+    if (sessions && sessions.length > 0) {
+      try {
+        localStorage.setItem('rime_voice_sessions', JSON.stringify(sessions));
+      } catch (e) {
+        console.error('Failed to save sessions to localStorage:', e);
+      }
+    }
+  }, [sessions]);
+
+  // Sync Active Session ID to LocalStorage
+  useEffect(() => {
+    if (sessionId) {
+      try {
+        localStorage.setItem('rime_voice_active_session', sessionId);
+      } catch (e) {
+        console.error('Failed to save active sessionId to localStorage:', e);
+      }
+    }
+  }, [sessionId]);
+
+  // Sync Conversation Turns for current sessionId to LocalStorage
+  useEffect(() => {
+    if (!sessionId) return;
+    try {
+      const saved = localStorage.getItem('rime_voice_chats');
+      const chatsMap = saved ? JSON.parse(saved) : {};
+      chatsMap[sessionId] = conversationTurns;
+      localStorage.setItem('rime_voice_chats', JSON.stringify(chatsMap));
+    } catch (e) {
+      console.error('Failed to save chat turns to localStorage:', e);
+    }
+  }, [conversationTurns, sessionId]);
 
   // Sync VAD callbacks with current React state
   useEffect(() => {
@@ -48,13 +190,13 @@ export default function App() {
   }, [agentState, sessionId, activeTurnId]);
 
   // Connect / Reconnect Helper
-  const connectSession = async () => {
+  const connectSession = async (explicitSessionId = null, forceNewSession = false) => {
     try {
       setErrorMessage('');
       const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json()).catch(() => null);
       setBackendStatus(rootRes);
 
-      let targetSessionId = sessionId;
+      let targetSessionId = forceNewSession ? '' : (explicitSessionId || sessionId);
       let targetTurnId = activeTurnId;
 
       if (!targetSessionId) {
@@ -63,19 +205,24 @@ export default function App() {
         targetTurnId = sess.active_turn_id;
         setSessionId(sess.session_id);
         setActiveTurnId(sess.active_turn_id);
+
+        setSessions((prev) => [
+          { id: sess.session_id, title: `Voice Session #${sess.session_id.slice(0, 8)}`, date: 'Active' },
+          ...prev,
+        ]);
       }
 
       defaultPlaybackManager.setSession(targetSessionId, targetTurnId);
       defaultWebSocketClient.connect(targetSessionId);
+      setAgentState(AgentState.IDLE);
     } catch (err) {
       console.error('Session connection error:', err);
       setErrorMessage(`Connection Error: Unable to connect to backend service. (${err.message})`);
     }
   };
 
-  // Initialize session and subscribe to Playback Manager, Recorder, VAD, and WebSocket events
+  // Initialize session and subscribe to services
   useEffect(() => {
-    // 1. Playback state listener
     const unsubState = defaultPlaybackManager.onStateChange((state, prevState, audio) => {
       setPlaybackState(state);
       setCurrentAudio(audio);
@@ -86,12 +233,11 @@ export default function App() {
       }
     });
 
-    // 2. Structured audio events
     const unsubEvents = defaultPlaybackManager.onEvent((evt) => {
       setEvents((prev) => [evt, ...prev.slice(0, 59)]);
     });
 
-    // 3. Microphone recorder state
+    // 3. Microphone recorder state & live level
     const unsubRecorder = defaultRecorder.onStateChange((state) => {
       const rec = state === RecorderState.RECORDING;
       setIsRecording(rec);
@@ -105,13 +251,16 @@ export default function App() {
       }
     });
 
+    const unsubLevel = defaultRecorder.onLevelChange((lvl) => {
+      setMicLevel(lvl);
+    });
+
     // 4. VAD real-time barge-in listener
     const unsubVAD = defaultVAD.onEvent(async (evt) => {
       if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
         const t_detection = Date.now();
 
-        // Immediately halt active Rime audio and advance client turn
-        defaultPlaybackManager.stopCurrentAudio('interruption_barge_in');
+        defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
         defaultPlaybackManager.setActiveTurn(evt.newTurnId);
 
         const t_stop = Date.now();
@@ -126,7 +275,6 @@ export default function App() {
           timestamp: t_detection,
         });
 
-        // Mark previously active turn in conversation history as INTERRUPTED
         setConversationTurns((prev) =>
           prev.map((t) =>
             t.turnId === evt.previousTurnId
@@ -169,7 +317,6 @@ export default function App() {
           ...prev.slice(0, 59),
         ]);
 
-        // Send real-time interruption cue over WebSocket
         defaultWebSocketClient.sendInterruption({
           previousTurnId: evt.previousTurnId,
           newTurnId: evt.newTurnId,
@@ -215,7 +362,6 @@ export default function App() {
       }
     });
 
-    // 5. WebSocket events & state
     const unsubWsState = defaultWebSocketClient.onStateChange((state) => {
       setWsState(state);
       if (state === WebSocketState.CONNECTED) {
@@ -248,56 +394,31 @@ export default function App() {
       } else if (evt.event_type === ServerEventType.AUDIO_STARTED) {
         setAgentState(AgentState.PLAYING);
       } else if (evt.event_type === ServerEventType.AUDIO_DATA) {
-        const audioB64 = evt.data?.audio_b64;
-        if (audioB64 && evt.turn_id === defaultPlaybackManager.activeTurnId) {
-          try {
-            const byteCharacters = atob(audioB64);
-            const byteNumbers = new Array(byteCharacters.length);
-            for (let i = 0; i < byteCharacters.length; i++) {
-              byteNumbers[i] = byteCharacters.charCodeAt(i);
-            }
-            const byteArray = new Uint8Array(byteNumbers);
-            const blob = new Blob([byteArray], { type: 'audio/mpeg' });
-
-            setAgentState(AgentState.PLAYING);
-            await defaultPlaybackManager.playAudio({
-              sessionId: evt.session_id,
-              turnId: evt.turn_id,
-              audioSource: blob,
-              metadata: {
-                speaker: evt.data?.speaker || 'celeste',
-                modelId: evt.data?.model_id || 'coda',
-                format: evt.data?.format || 'mp3',
-                bytes: evt.data?.bytes_length || byteArray.length,
-              },
-            });
-          } catch (err) {
-            console.error('Error decoding/playing WebSocket audio data:', err);
-          }
+        if (evt.data?.audio_chunk && evt.turn_id) {
+          defaultPlaybackManager.queueAudioChunk(evt.turn_id, evt.data.audio_chunk);
         }
       } else if (evt.event_type === ServerEventType.AUDIO_STOP) {
-        defaultPlaybackManager.stopCurrentAudio(evt.data?.reason || 'ws_audio_stop');
-        setAgentState(AgentState.LISTENING);
+        defaultPlaybackManager.stopCurrentAudio('server_audio_stop');
+        setAgentState(AgentState.INTERRUPTING);
       } else if (evt.event_type === ServerEventType.TURN_INTERRUPTED) {
-        const newId = evt.data?.new_turn_id;
-        if (newId) {
-          setPreviousTurnId(evt.turn_id || activeTurnId);
-          setPreviousTurnStatus('INTERRUPTED');
-          setActiveTurnId(newId);
-          defaultPlaybackManager.setActiveTurn(newId);
+        if (evt.data?.new_turn_id) {
+          setActiveTurnId(evt.data.new_turn_id);
+          defaultPlaybackManager.setActiveTurn(evt.data.new_turn_id);
         }
-        setAgentState(AgentState.LISTENING);
+        setAgentState(AgentState.RECOVERING);
       } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
-        if (evt.data?.assistant_response) {
+        const candidateResponse = evt.data?.response || evt.data?.final_response || evt.data?.assistant_response;
+        if (candidateResponse) {
+          const validatedResponse = sanitizeFinalResponse(candidateResponse);
           setPreviousTurnId(evt.turn_id);
           setPreviousTurnStatus('COMPLETED');
           setConversationTurns((prev) => [
             ...prev,
             {
               turnId: evt.turn_id,
-              userPrompt: evt.data.user_prompt || ttsText,
-              assistantResponse: evt.data.assistant_response,
-              latencyMs: evt.data.latency_ms,
+              userPrompt: evt.data?.user_prompt || ttsText,
+              assistantResponse: validatedResponse,
+              latencyMs: evt.data?.latency_ms,
               speaker: evt.data?.speaker || 'celeste',
               status: 'COMPLETED',
             },
@@ -314,6 +435,7 @@ export default function App() {
       unsubState();
       unsubEvents();
       unsubRecorder();
+      unsubLevel();
       unsubVAD();
       unsubWsState();
       unsubWsEvents();
@@ -330,7 +452,42 @@ export default function App() {
     setTtsText('Search for a flight from New York to Tokyo.');
   };
 
-  // Handler: Advance monotonic turn manually
+  // Handler: Start a new conversation session
+  const handleNewChat = async () => {
+    setConversationTurns([]);
+    setTtsText('');
+    setErrorMessage('');
+    const sess = await defaultApiClient.createSession();
+    setSessionId(sess.session_id);
+    setActiveTurnId(sess.active_turn_id);
+    defaultPlaybackManager.setSession(sess.session_id, sess.active_turn_id);
+    defaultWebSocketClient.connect(sess.session_id);
+
+    setSessions((prev) => [
+      { id: sess.session_id, title: `Voice Session #${sess.session_id.slice(0, 8)}`, date: 'Just now' },
+      ...prev,
+    ]);
+  };
+
+  const handleSelectSession = (id) => {
+    setSessionId(id);
+    try {
+      const savedMap = localStorage.getItem('rime_voice_chats');
+      if (savedMap) {
+        const map = JSON.parse(savedMap);
+        setConversationTurns(map[id] || []);
+      } else {
+        setConversationTurns([]);
+      }
+    } catch (e) {
+      console.error('Failed to restore session chat turns:', e);
+      setConversationTurns([]);
+    }
+    defaultPlaybackManager.setSession(id, 1);
+    defaultWebSocketClient.connect(id);
+  };
+
+  // Handler: Advance monotonic turn
   const handleAdvanceTurn = async () => {
     if (!sessionId) return;
     try {
@@ -356,12 +513,37 @@ export default function App() {
     }
   };
 
+  const updateSessionTitleIfFirst = (sessId, promptText) => {
+    if (!sessId || !promptText || !promptText.trim()) return;
+    const cleanPrompt = promptText.trim();
+    const titleText = cleanPrompt.slice(0, 26) + (cleanPrompt.length > 26 ? '...' : '');
+
+    setSessions((prevSessions) =>
+      prevSessions.map((s) => {
+        if (s.id === sessId && (s.title.startsWith('Voice Session #') || s.title.startsWith('New Chat'))) {
+          return { ...s, title: titleText };
+        }
+        return s;
+      })
+    );
+  };
+
   // Handler: Push-to-Talk Recording
   const handleToggleRecord = async () => {
     if (isRecording) {
       try {
         const recResult = await defaultRecorder.stopRecording();
-        if (!recResult || !recResult.blob) return;
+        if (!recResult || !recResult.blob) {
+          setAgentState(AgentState.IDLE);
+          return;
+        }
+
+        // Gracefully handle accidental micro-clicks (< 250ms or < 300 bytes)
+        if (recResult.durationMs < 250 || recResult.blob.size < 300) {
+          setAgentState(AgentState.IDLE);
+          setErrorMessage('Audio clip was too short. Please click Talk, speak your request, and click again to finish.');
+          return;
+        }
 
         setIsProcessing(true);
         setAgentState(AgentState.TRANSCRIBING);
@@ -387,20 +569,22 @@ export default function App() {
         const turnId = headers.turnId;
         setActiveTurnId(turnId);
         defaultPlaybackManager.setActiveTurn(turnId);
+        updateSessionTitleIfFirst(sessionId, headers.userTranscript);
 
+        const validatedResponse = sanitizeFinalResponse(headers.finalResponse);
         setConversationTurns((prev) => [
           ...prev,
           {
             turnId,
             userPrompt: headers.userTranscript,
-            assistantResponse: headers.assistantResponse,
+            assistantResponse: validatedResponse,
             speaker: headers.speaker || 'celeste',
             modelId: headers.modelId || 'coda',
             latencyMs: headers.latencyMs,
             status: 'COMPLETED',
           },
         ]);
-        setTtsText(headers.assistantResponse);
+        setTtsText('');
 
         setEvents((prev) => [
           {
@@ -411,7 +595,7 @@ export default function App() {
             state: playbackState,
             details: {
               transcript: headers.userTranscript,
-              response: headers.assistantResponse,
+              response: headers.finalResponse,
               llm_model: headers.llmModel,
               speaker: headers.speaker,
               audio_bytes: headers.audioBytesLength,
@@ -434,16 +618,29 @@ export default function App() {
           },
         });
       } catch (err) {
-        console.error('Voice Agent orchestration error:', err);
-        setAgentState(AgentState.ERROR);
-        setErrorMessage(`Voice Agent Error: ${err.message}`);
+        if (err.status === 409 || err.message?.includes('cancelled') || err.message?.includes('superseded')) {
+          console.log('Turn audio processing cleanly interrupted:', err.message);
+          setAgentState(AgentState.LISTENING);
+          setErrorMessage('');
+        } else {
+          console.error('Voice Agent orchestration error:', err);
+          setAgentState(AgentState.ERROR);
+          setErrorMessage(`Voice Agent Error: ${err.message}`);
+        }
       } finally {
         setIsProcessing(false);
       }
     } else {
       try {
         setErrorMessage('');
-        await defaultRecorder.startRecording();
+        if (isTestingMic) {
+          handleTestMic();
+        }
+        defaultPlaybackManager.primePlayback();
+        await defaultRecorder.startRecording(selectedDeviceId || null);
+        defaultRecorder.getAudioDevices().then((devs) => {
+          if (devs && devs.length > 0) setAudioDevices(devs);
+        });
       } catch (err) {
         setAgentState(AgentState.ERROR);
         setErrorMessage(`Microphone Error: ${err.message}`);
@@ -452,35 +649,40 @@ export default function App() {
   };
 
   // Handler: Text-based Voice Agent Pipeline
-  const handleProcessText = async () => {
-    if (!sessionId || !ttsText.trim()) return;
+  const handleProcessText = async (customPrompt = null) => {
+    const promptToSend = typeof customPrompt === 'string' ? customPrompt : ttsText;
+    if (!sessionId || !promptToSend.trim()) return;
 
+    defaultPlaybackManager.primePlayback();
     setIsLoading(true);
     setIsProcessing(true);
     setAgentState(AgentState.THINKING);
 
     try {
       const { blob, headers } = await defaultApiClient.processAgentText({
-        text: ttsText,
+        text: promptToSend,
         sessionId,
       });
 
       const turnId = headers.turnId;
       setActiveTurnId(turnId);
       defaultPlaybackManager.setActiveTurn(turnId);
+      updateSessionTitleIfFirst(sessionId, promptToSend);
 
+      const validatedResponse = sanitizeFinalResponse(headers.finalResponse || headers.assistantResponse);
       setConversationTurns((prev) => [
         ...prev,
         {
           turnId,
-          userPrompt: ttsText,
-          assistantResponse: headers.assistantResponse,
+          userPrompt: promptToSend,
+          assistantResponse: validatedResponse,
           speaker: headers.speaker || 'celeste',
           modelId: headers.modelId || 'coda',
           latencyMs: headers.latencyMs,
           status: 'COMPLETED',
         },
       ]);
+      setTtsText('');
 
       setEvents((prev) => [
         {
@@ -490,8 +692,8 @@ export default function App() {
           turn_id: turnId,
           state: playbackState,
           details: {
-            prompt: ttsText,
-            response: headers.assistantResponse,
+            prompt: promptToSend,
+            response: headers.finalResponse || headers.assistantResponse,
             llm_model: headers.llmModel,
             speaker: headers.speaker,
             audio_bytes: headers.audioBytesLength,
@@ -514,22 +716,28 @@ export default function App() {
         },
       });
     } catch (err) {
-      console.error('Agent text processing error:', err);
-      setAgentState(AgentState.ERROR);
-      setErrorMessage(`Voice Agent Error: ${err.message}`);
+      if (err.status === 409 || err.message?.includes('cancelled') || err.message?.includes('superseded')) {
+        console.log('Turn text processing cleanly interrupted:', err.message);
+        setAgentState(AgentState.IDLE);
+        setErrorMessage('');
+      } else {
+        console.error('Agent text processing error:', err);
+        setAgentState(AgentState.ERROR);
+        setErrorMessage(`Voice Agent Error: ${err.message}`);
+      }
     } finally {
       setIsLoading(false);
       setIsProcessing(false);
     }
   };
 
-  // Handler: Immediate Stop Audio
+  // Handler: Stop Active Audio Output
   const handleStopAudio = () => {
-    defaultPlaybackManager.stopCurrentAudio('user_manual_stop');
+    defaultPlaybackManager.stopCurrentAudio('user_click_stop');
     setAgentState(AgentState.IDLE);
   };
 
-  // Handler: Manual Barge-In Trigger
+  // Handler: Manual Barge-In Interruption
   const handleBargeIn = async () => {
     if (!sessionId) return;
     const t_detection = Date.now();
@@ -537,7 +745,6 @@ export default function App() {
     const prevAgentState = agentState;
     const nextTurnId = prevTurnId + 1;
 
-    // Immediately stop active audio and advance client active turn
     defaultPlaybackManager.stopCurrentAudio('manual_barge_in');
     defaultPlaybackManager.setActiveTurn(nextTurnId);
 
@@ -644,132 +851,217 @@ export default function App() {
     }
   };
 
+  const handleSelectQuickPrompt = (promptText) => {
+    setTtsText(promptText);
+    handleProcessText(promptText);
+  };
+
   return (
-    <div className="app-container">
-      <header className="app-header">
-        <div className="logo-badge">
-          <span className="logo-dot"></span>
-          <h1>Voice AI Assistant with Interruption &amp; Recovery</h1>
-        </div>
-        <p className="app-tagline">
-          Ultra-Low Latency Conversational Voice &bull; Rime Labs TTS &bull; Real-Time Interruption &amp; Recovery
-        </p>
-      </header>
+    <div className="modern-app-layout">
+      {/* 1. Left Collapsible Sidebar (ChatGPT / Claude Style) */}
+      <Sidebar
+        sessions={sessions}
+        activeSessionId={sessionId}
+        onSelectSession={handleSelectSession}
+        onNewChat={handleNewChat}
+        isDevMode={isDevMode}
+        onToggleDevMode={() => setIsDevMode(!isDevMode)}
+        isOpen={isSidebarOpen}
+        onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+      />
 
-      {/* Disconnect or Error Notice Banner */}
-      {errorMessage && (
-        <div className="alert-banner alert-error" role="alert">
-          <span className="alert-icon">⚠️</span>
-          <span className="alert-text">{errorMessage}</span>
-          <button
-            type="button"
-            className="btn-tiny btn-alert-action"
-            onClick={connectSession}
-          >
-            Reconnect
-          </button>
-        </div>
-      )}
-
-      {/* Interruption Alert Banner */}
-      {interruptionInfo && agentState === AgentState.INTERRUPTING && (
-        <div className="alert-banner alert-interruption" role="status">
-          <span className="alert-icon">⚡</span>
-          <span className="alert-text">
-            <strong>Barge-In Detected:</strong> Turn #{interruptionInfo.previousTurnId} halted promptly ({interruptionInfo.stopLatencyMs.toFixed(2)} ms). Obsolete tasks cancelled. Turn #{interruptionInfo.newTurnId} is now authoritative.
-          </span>
-        </div>
-      )}
-
-      {/* Verified Empirical Benchmark Card */}
-      <div className="benchmark-summary-card glass-card">
-        <div className="benchmark-header" onClick={() => setShowBenchmarkCard(!showBenchmarkCard)}>
-          <div className="benchmark-title-row">
-            <span className="benchmark-badge">VERIFIED BENCHMARK EVIDENCE</span>
-            <span className="benchmark-claim">20/20 Trials Passed &bull; 0 Stale Speech Leaks &bull; 100% Recovery</span>
+      {/* 2. Main Chat Workspace */}
+      <div className="chat-workspace">
+        {/* Top Header Bar */}
+        <header className="chat-top-header">
+          <div className="header-left">
+            {!isSidebarOpen && (
+              <button
+                type="button"
+                className="btn-open-sidebar"
+                onClick={() => setIsSidebarOpen(true)}
+                title="Expand Sidebar"
+              >
+                ☰
+              </button>
+            )}
+            <h1 className="chat-app-title">Voice AI Assistant</h1>
           </div>
-          <button type="button" className="btn-tiny btn-toggle-card">
-            {showBenchmarkCard ? 'Hide Details ▲' : 'Show Details ▼'}
-          </button>
-        </div>
 
-        {showBenchmarkCard && (
-          <div className="benchmark-stats-grid">
-            <div className="benchmark-stat">
-              <span className="stat-label">Recovery Rate</span>
-              <span className="stat-val highlight-green">100.0% (20/20)</span>
-            </div>
-            <div className="benchmark-stat">
-              <span className="stat-label">Latest-Turn Correctness</span>
-              <span className="stat-val highlight-green">100.0% (20/20)</span>
-            </div>
-            <div className="benchmark-stat">
-              <span className="stat-label">Stale Responses Spoken</span>
-              <span className="stat-val highlight-green">0 leaks</span>
-            </div>
-            <div className="benchmark-stat">
-              <span className="stat-label">Stale Audio to Playback</span>
-              <span className="stat-val highlight-green">0 events</span>
-            </div>
-            <div className="benchmark-stat stat-wide">
-              <span className="stat-label">Application-level interruption-to-playback-stop latency</span>
-              <span className="stat-val mono">Mean: 0.116 ms &bull; P95: 0.181 ms (Min: 0.068 ms, Max: 0.196 ms)</span>
-            </div>
+          <div className="header-center">
+            {/* Audio Waveform Banner */}
+            <SpeakingIndicator
+              state={playbackState}
+              agentState={agentState}
+              currentAudio={currentAudio}
+              interruptionInfo={interruptionInfo}
+              errorMessage={errorMessage}
+              micLevel={micLevel}
+            />
+          </div>
+
+          <div className="header-right">
+            <StatusChips
+              agentState={agentState}
+              playbackState={playbackState}
+              wsState={wsState}
+              onReconnect={() => connectSession()}
+            />
+          </div>
+        </header>
+
+        {/* Notice Error Banner */}
+        {errorMessage && (
+          <div className="alert-banner alert-error" role="alert">
+            <span className="alert-icon"><IconAlert size={16} color="#ef4444" /></span>
+            <span className="alert-text">{errorMessage}</span>
+            <button
+              type="button"
+              className="btn-tiny btn-alert-action"
+              onClick={() => connectSession()}
+            >
+              Reconnect
+            </button>
           </div>
         )}
-      </div>
 
-      <main className="app-main">
-        <SpeakingIndicator
-          state={playbackState}
+        {/* Interruption Alert Banner */}
+        {interruptionInfo && agentState === AgentState.INTERRUPTING && (
+          <div className="alert-banner alert-interruption" role="status">
+            <span className="alert-icon">⚡</span>
+            <span className="alert-text">
+              <strong>Barge-In Detected:</strong> Turn #{interruptionInfo.previousTurnId} halted promptly ({interruptionInfo.stopLatencyMs?.toFixed(2) || '< 0.2'} ms). Obsolete tasks cancelled. Turn #{interruptionInfo.newTurnId} is now authoritative.
+            </span>
+          </div>
+        )}
+
+        {/* Developer Mode Panels */}
+        {isDevMode && (
+          <div className="dev-mode-drawer glass-card">
+            <div className="dev-drawer-header">
+              <span className="dev-badge">DEVELOPER DEBUG & BENCHMARK MODE</span>
+              <button type="button" className="btn-tiny" onClick={() => setIsDevMode(false)}>Close ✖</button>
+            </div>
+
+            {/* Benchmark Summary Card */}
+            <div className="benchmark-summary-card">
+              <div className="benchmark-header" onClick={() => setShowBenchmarkCard(!showBenchmarkCard)}>
+                <div className="benchmark-title-row">
+                  <span className="benchmark-badge">VERIFIED BENCHMARK EVIDENCE</span>
+                  <span className="benchmark-claim">20/20 Trials Passed &bull; 0 Stale Speech Leaks &bull; 100% Recovery</span>
+                </div>
+                <button type="button" className="btn-tiny btn-toggle-card">
+                  {showBenchmarkCard ? 'Hide Details ▲' : 'Show Details ▼'}
+                </button>
+              </div>
+
+              {showBenchmarkCard && (
+                <div className="benchmark-stats-grid">
+                  <div className="benchmark-stat">
+                    <span className="stat-label">Recovery Rate</span>
+                    <span className="stat-val highlight-green">100.0% (20/20)</span>
+                  </div>
+                  <div className="benchmark-stat">
+                    <span className="stat-label">Latest-Turn Correctness</span>
+                    <span className="stat-val highlight-green">100.0% (20/20)</span>
+                  </div>
+                  <div className="benchmark-stat">
+                    <span className="stat-label">Stale Responses Spoken</span>
+                    <span className="stat-val highlight-green">0 leaks</span>
+                  </div>
+                  <div className="benchmark-stat">
+                    <span className="stat-label">Stale Audio to Playback</span>
+                    <span className="stat-val highlight-green">0 events</span>
+                  </div>
+                  <div className="benchmark-stat stat-wide">
+                    <span className="stat-label">Application-level interruption latency</span>
+                    <span className="stat-val mono">Mean: 0.116 ms &bull; P95: 0.181 ms (Min: 0.068 ms, Max: 0.196 ms)</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Technical System Status */}
+            <Status
+              sessionId={sessionId}
+              activeTurnId={activeTurnId}
+              previousTurnId={previousTurnId}
+              previousTurnStatus={previousTurnStatus}
+              state={playbackState}
+              agentState={agentState}
+              wsState={wsState}
+              metadata={currentAudio?.metadata}
+              backendStatus={backendStatus}
+              onReconnect={() => connectSession()}
+            />
+
+            {/* Dev Manual Controls */}
+            <VoiceButton
+              state={playbackState}
+              agentState={agentState}
+              onAdvanceTurn={handleAdvanceTurn}
+              onProcessText={() => handleProcessText()}
+              onStop={handleStopAudio}
+              onToggleRecord={handleToggleRecord}
+              onBargeIn={handleBargeIn}
+              onToggleVAD={handleToggleVAD}
+              isRecording={isRecording}
+              isProcessing={isProcessing}
+              isLoading={isLoading}
+              isVADActive={isVADActive}
+              activeTurnId={activeTurnId}
+              isDevMode={true}
+              audioDevices={audioDevices}
+              selectedDeviceId={selectedDeviceId}
+              onSelectDevice={(id) => {
+                setSelectedDeviceId(id);
+                localStorage.setItem('rime_mic_device', id);
+              }}
+              onTestMic={handleTestMic}
+              isTestingMic={isTestingMic}
+              micLevel={isTestingMic ? testMicLevel : micLevel}
+            />
+
+            {/* Real-time Audit Log */}
+            <Transcript
+              events={events}
+              text={ttsText}
+              setText={setTtsText}
+              conversationTurns={conversationTurns}
+              activeTurnId={activeTurnId}
+              onLoadNormalDemo={handleLoadNormalDemo}
+              onLoadStressDemo={handleLoadStressDemo}
+            />
+          </div>
+        )}
+
+        {/* 3. Main Scrollable Chat Thread Stream */}
+        <ChatThread
+          conversationTurns={conversationTurns}
+          currentTranscript={ttsText}
+          isListening={isRecording || agentState === AgentState.LISTENING}
+          isProcessing={isProcessing || agentState === AgentState.THINKING || agentState === AgentState.SYNTHESIZING}
           agentState={agentState}
-          currentAudio={currentAudio}
-          interruptionInfo={interruptionInfo}
-        />
-
-        <Status
-          sessionId={sessionId}
           activeTurnId={activeTurnId}
-          previousTurnId={previousTurnId}
-          previousTurnStatus={previousTurnStatus}
-          state={playbackState}
-          agentState={agentState}
-          wsState={wsState}
-          metadata={currentAudio?.metadata}
-          backendStatus={backendStatus}
-          onReconnect={connectSession}
         />
 
-        <VoiceButton
-          state={playbackState}
-          agentState={agentState}
-          onAdvanceTurn={handleAdvanceTurn}
-          onProcessText={handleProcessText}
-          onStop={handleStopAudio}
+        {/* 4. Bottom Modern Floating Input Bar */}
+        <ChatInput
+          text={ttsText}
+          setText={setTtsText}
+          onSend={handleProcessText}
           onToggleRecord={handleToggleRecord}
-          onBargeIn={handleBargeIn}
+          onStopAudio={handleStopAudio}
           onToggleVAD={handleToggleVAD}
           isRecording={isRecording}
           isProcessing={isProcessing}
           isLoading={isLoading}
           isVADActive={isVADActive}
-          activeTurnId={activeTurnId}
+          playbackState={playbackState}
+          agentState={agentState}
+          onSelectQuickPrompt={handleSelectQuickPrompt}
         />
-
-        <Transcript
-          events={events}
-          text={ttsText}
-          setText={setTtsText}
-          conversationTurns={conversationTurns}
-          activeTurnId={activeTurnId}
-          onLoadNormalDemo={handleLoadNormalDemo}
-          onLoadStressDemo={handleLoadStressDemo}
-        />
-      </main>
-
-      <footer className="app-footer">
-        <span>DataForge 2026 Rime Hackathon &bull; Phase 16 Demo &amp; UX Hardening &bull; Rime TTS (<span className="mono">coda</span> / <span className="mono">celeste</span>)</span>
-      </footer>
+      </div>
     </div>
   );
 }

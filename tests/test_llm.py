@@ -16,6 +16,8 @@ from backend.app.services.llm import (
     GroqLLMService,
     GroqLLMServiceError,
     VOICE_SYSTEM_PROMPT,
+    SAFE_FALLBACK_RESPONSE,
+    _spoken_answer,
 )
 from backend.app.core.session import default_session_store
 
@@ -156,7 +158,9 @@ async def test_groq_llm_custom_system_prompt():
         )
 
         call_kwargs = mock_post.call_args.kwargs
-        assert call_kwargs["json"]["messages"][0]["content"] == "Custom pilot voice instruction."
+        system_content = call_kwargs["json"]["messages"][0]["content"]
+        assert VOICE_SYSTEM_PROMPT in system_content
+        assert "Custom pilot voice instruction." in system_content
 
 
 @pytest.mark.asyncio
@@ -263,6 +267,146 @@ async def test_groq_llm_empty_choices_handling():
         mock_post.return_value = mock_resp
         with pytest.raises(GroqLLMServiceError, match="empty choices"):
             await service.generate(messages=[ChatMessage(role="user", content="Hi")])
+
+
+@pytest.mark.parametrize(
+    ("user_text", "model_text"),
+    [
+        ("Search for a flight from New York to Tokyo.", "Sure. What date would you like to travel?"),
+        ("What is the capital of France?", "The capital of France is Paris."),
+        ("Tell me a quick joke.", "Why did the computer get cold? It left its Windows open."),
+        ("How far is the Moon from Earth?", "The Moon is about 384,400 kilometers from Earth on average."),
+        ("Plan a weekend trip to Delhi.", "Sure. What dates would you like to travel?"),
+    ],
+)
+def test_spoken_answer_keeps_natural_voice_response(user_text, model_text):
+    """Five representative voice requests must produce only natural speech text."""
+    contaminated = (
+        f"Identify the user's request: {user_text}\n"
+        "Check Constraints: concise voice assistant.\n"
+        f"Final Answer: {model_text}"
+    )
+
+    assert _spoken_answer(contaminated) == model_text
+
+
+@pytest.mark.asyncio
+async def test_reasoning_fields_are_never_sent_to_speech():
+    """Internal reasoning without user-facing content becomes a safe fallback."""
+    service = GroqLLMService(
+        app_settings=Settings(
+            rime_api_key="test-rime",
+            groq_api_key="gsk_test_key",
+            gemini_api_key="test-gemini",
+        )
+    )
+    response = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "reasoning_content": "Analyze the request and check constraints.",
+            }
+        }]
+    }
+
+    mock_resp = httpx.Response(
+        status_code=200,
+        json=response,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        result = await service.generate(messages=[ChatMessage(role="user", content="Hello")])
+
+    assert result["text"] == SAFE_FALLBACK_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_unsupported_tool_call_uses_safe_fallback():
+    """Tool calls without an executor must never reach the UI or TTS as raw data."""
+    service = GroqLLMService(
+        app_settings=Settings(
+            rime_api_key="test-rime",
+            groq_api_key="gsk_test_key",
+            gemini_api_key="test-gemini",
+        )
+    )
+    response = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{"function": {"name": "get_weather", "arguments": "{}"}}],
+            }
+        }]
+    }
+    mock_resp = httpx.Response(
+        status_code=200,
+        json=response,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        result = await service.generate(messages=[ChatMessage(role="user", content="What is the weather?")])
+
+    assert result["text"] == SAFE_FALLBACK_RESPONSE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "assistant", "final": "The final user-facing answer."},
+        {"role": "assistant", "output": {"text": "The structured output answer."}},
+        {"role": "assistant", "content": "The content answer."},
+    ],
+)
+async def test_structured_final_fields_are_used(message):
+    """Provider metadata and reasoning fields must never replace final response fields."""
+    service = GroqLLMService(
+        app_settings=Settings(
+            rime_api_key="test-rime",
+            groq_api_key="gsk_test_key",
+            gemini_api_key="test-gemini",
+        )
+    )
+    response = {"choices": [{"message": {**message, "reasoning": "Do not speak this."}}]}
+    mock_resp = httpx.Response(
+        status_code=200,
+        json=response,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        result = await service.generate(messages=[ChatMessage(role="user", content="Hello")])
+
+    assert "Do not speak this" not in result["text"]
+    assert result["text"] != SAFE_FALLBACK_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_user_and_system_messages_remain_separate():
+    """The transcribed user message is sent as user content, never concatenated into system text."""
+    service = GroqLLMService(
+        app_settings=Settings(
+            rime_api_key="test-rime",
+            groq_api_key="gsk_test_key",
+            gemini_api_key="test-gemini",
+        )
+    )
+    mock_resp = httpx.Response(
+        status_code=200,
+        json=MOCK_GROQ_CHAT_RESPONSE,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+    user_text = "Search for a flight from New York to Tokyo."
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        await service.generate(messages=[ChatMessage(role="user", content=user_text)])
+
+    request_messages = mock_post.call_args.kwargs["json"]["messages"]
+    assert request_messages[0]["role"] == "system"
+    assert request_messages[1] == {"role": "user", "content": user_text}
+    assert user_text not in request_messages[0]["content"]
 
 
 # ---------------------------------------------------------------------------

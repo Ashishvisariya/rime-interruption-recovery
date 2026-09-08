@@ -53,6 +53,7 @@ class VoiceAgentExecutionResult:
     turn_id: int
     user_prompt: str
     assistant_text: str
+    final_response: str
     audio_bytes: bytes
     tts_metadata: RimeTTSMetadata
     llm_metadata: Dict[str, Any]
@@ -65,6 +66,8 @@ class VoiceAgentExecutionResult:
             turn_id=self.turn_id,
             user_prompt=self.user_prompt,
             assistant_text=self.assistant_text,
+            response=self.final_response,
+            final_response=self.final_response,
             llm_provider=self.llm_metadata.get("provider", "groq"),
             llm_model=self.llm_metadata.get("model", "qwen/qwen3.6-27b"),
             tts_provider=self.tts_metadata.provider,
@@ -187,6 +190,7 @@ class VoiceAgentOrchestrator:
                         turn_id=current_turn_id,
                     )
                     user_prompt_text = stt_result.text.strip()
+                    print(f"[VOICE_AGENT] STT result: repr={repr(user_prompt_text)}")
                 except STTError as e:
                     raise VoiceAgentOrchestrationError(f"STT Failure: {str(e)}", status_code=502)
                 except ValueError as e:
@@ -198,6 +202,18 @@ class VoiceAgentOrchestrator:
                         f"Turn {current_turn_id} superseded during STT transcription.",
                         session_id=current_session_id,
                         turn_id=current_turn_id,
+                    )
+
+                # Check for known Whisper silence hallucinations (e.g. "you", "thank you for watching")
+                silence_hallucinations = {
+                    "you", "you.", "you!", "you?",
+                    "thank you for watching", "thank you for watching.",
+                    "captioning by", "subtitles by",
+                }
+                if user_prompt_text.lower().strip() in silence_hallucinations:
+                    raise VoiceAgentOrchestrationError(
+                        "No speech detected. The audio was silent or unclear. Please check your microphone and speak again.",
+                        status_code=400,
                     )
 
                 # Update turn prompt & history if not already registered
@@ -220,7 +236,10 @@ class VoiceAgentOrchestrator:
                 )
 
             # Step 4: Extract LLM Conversation Context
-            llm_messages = session.get_context_for_llm(system_prompt=system_prompt)
+            llm_messages = session.get_context_for_llm(
+                system_prompt=system_prompt,
+                max_messages=8,
+            )
 
             # Step 5: Groq LLM Response Generation
             try:
@@ -228,11 +247,20 @@ class VoiceAgentOrchestrator:
                     messages=llm_messages,
                     system_prompt=system_prompt,
                 )
-                assistant_response_text = llm_result["text"].strip()
+                raw_text = (
+                    llm_result.get("final_response") or llm_result.get("response") or llm_result.get("text") or ""
+                ).strip()
             except GroqLLMServiceError as e:
                 raise VoiceAgentOrchestrationError(f"LLM Generation Failure: {str(e)}", status_code=502)
             except ValueError as e:
                 raise VoiceAgentOrchestrationError(f"Invalid LLM Request: {str(e)}", status_code=400)
+
+            # Defensive verification: Ensure assistant_response_text is strictly user-facing
+            from backend.app.services.llm import clean_final_user_response
+            assistant_response_text = clean_final_user_response(
+                raw_text,
+                user_prompt=user_prompt_text,
+            )
 
             # Step 6: Post-LLM / Pre-TTS Turn Validation
             if not session.validate_turn(current_turn_id):
@@ -280,6 +308,7 @@ class VoiceAgentOrchestrator:
                 turn_id=current_turn_id,
                 user_prompt=user_prompt_text,
                 assistant_text=assistant_response_text,
+                final_response=assistant_response_text,
                 audio_bytes=audio_bytes_out,
                 tts_metadata=tts_metadata,
                 llm_metadata=llm_result,

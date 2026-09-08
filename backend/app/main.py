@@ -4,6 +4,14 @@ FastAPI gateway configuring routes, deterministic health probes,
 safe global error handlers, and router mount points.
 """
 
+import sys
+from pathlib import Path
+
+# Ensure project root is in sys.path for Windows subprocess reloader
+_root_dir = str(Path(__file__).resolve().parent.parent.parent)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -35,6 +43,7 @@ app.add_middleware(
         "X-Turn-ID",
         "X-User-Transcript",
         "X-Assistant-Response",
+        "X-Final-Response",
         "X-LLM-Provider",
         "X-LLM-Model",
         "X-Provider",

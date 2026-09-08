@@ -7,6 +7,15 @@
 
 const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
 
+const safeDecodeHeader = (val) => {
+  if (!val) return '';
+  try {
+    return decodeURIComponent(val);
+  } catch (e) {
+    return val;
+  }
+};
+
 export class VoiceApiClient {
   constructor(baseUrl = API_BASE_URL) {
     this.baseUrl = baseUrl;
@@ -169,7 +178,7 @@ export class VoiceApiClient {
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({ error: res.statusText }));
-      const error = new Error(errData.error || `Voice agent processing failed (${res.status})`);
+      const error = new Error(errData.detail || errData.error || `Voice agent processing failed (${res.status})`);
       error.status = res.status;
       throw error;
     }
@@ -178,8 +187,9 @@ export class VoiceApiClient {
     const headers = {
       sessionId: res.headers.get('X-Session-ID'),
       turnId: parseInt(res.headers.get('X-Turn-ID') || String(turnId || 1), 10),
-      userTranscript: res.headers.get('X-User-Transcript') || '',
-      assistantResponse: res.headers.get('X-Assistant-Response') || '',
+      userTranscript: safeDecodeHeader(res.headers.get('X-User-Transcript')),
+      assistantResponse: safeDecodeHeader(res.headers.get('X-Assistant-Response')),
+      finalResponse: safeDecodeHeader(res.headers.get('X-Final-Response')) || safeDecodeHeader(res.headers.get('X-Assistant-Response')) || '',
       llmProvider: res.headers.get('X-LLM-Provider'),
       llmModel: res.headers.get('X-LLM-Model'),
       provider: res.headers.get('X-Provider'),
@@ -225,7 +235,7 @@ export class VoiceApiClient {
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({ error: res.statusText }));
-      const error = new Error(errData.error || `Voice agent text processing failed (${res.status})`);
+      const error = new Error(errData.detail || errData.error || `Voice agent text processing failed (${res.status})`);
       error.status = res.status;
       throw error;
     }
@@ -234,8 +244,9 @@ export class VoiceApiClient {
     const headers = {
       sessionId: res.headers.get('X-Session-ID'),
       turnId: parseInt(res.headers.get('X-Turn-ID') || String(turnId || 1), 10),
-      userTranscript: res.headers.get('X-User-Transcript') || text,
-      assistantResponse: res.headers.get('X-Assistant-Response') || '',
+      userTranscript: safeDecodeHeader(res.headers.get('X-User-Transcript')) || text,
+      assistantResponse: safeDecodeHeader(res.headers.get('X-Assistant-Response')),
+      finalResponse: safeDecodeHeader(res.headers.get('X-Final-Response')) || safeDecodeHeader(res.headers.get('X-Assistant-Response')) || '',
       llmProvider: res.headers.get('X-LLM-Provider'),
       llmModel: res.headers.get('X-LLM-Model'),
       provider: res.headers.get('X-Provider'),
