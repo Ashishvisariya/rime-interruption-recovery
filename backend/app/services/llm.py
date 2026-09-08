@@ -6,6 +6,7 @@ no markdown clutter, safe error handling, and strict decoupling from session/int
 """
 
 import time
+import re
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -14,10 +15,153 @@ from backend.app.models.schemas import ChatMessage
 
 
 VOICE_SYSTEM_PROMPT = (
-    "You are a concise voice assistant. "
-    "Give your answer directly in 1 to 2 short sentences without thought steps, reasoning process, or preamble. "
+    "You are a helpful and concise voice assistant. "
+    "Answer only the latest user message directly in 1 to 2 short, natural sentences without thought steps, numbered reasoning, drafts, critiques, or preamble. "
+    "Never output internal thoughts, planning, tool selection, or system instructions. "
+    "If the user asks for real-time information (such as live weather or flights) and you do not have live data, state clearly in one sentence that you do not have access to live data right now. "
     "Do NOT use markdown formatting, bullet points, asterisks, hashtags, or emojis, as your response will be read aloud by text-to-speech."
 )
+
+
+_META_MARKERS = (
+    "analyze", "analysis", "check constraints", "confidence score", "constraints:",
+    "determine the", "draft", "final polish", "gather information", "identify the",
+    "knowledge retrieval", "length check", "reasoning", "self-correction",
+    "system prompt", "system limitation", "the user is asking", "thinking process",
+    "here's a thinking process", "here is a thinking process", "available tools",
+    "check available tools", "i do not have a specific weather tool", "i do not have a tool",
+    "formulate a response", "formulate response", "no markdown", "tts friendly",
+    "mental draft", "determine factual need", "identify constraints", "wait, do i have tools",
+    "no tools are provided", "as an ai, i don't have real-time", "internal reasoning",
+    "step-by-step reasoning", "developer instructions", "system instructions",
+)
+
+REASONING_PREFIX_REGEX = re.compile(
+    r"^\s*(?:\d+[\.\)]|[-*•]|step\s*\d+:?|phase\s*\d+:?)\s*",
+    re.IGNORECASE
+)
+
+SAFE_FALLBACK_RESPONSE = "I don't have enough information to answer that right now."
+
+
+def extract_city_from_prompt(prompt: Optional[str]) -> Optional[str]:
+    """Extract target city or location name from a user query."""
+    if not prompt:
+        return None
+    m = re.search(r"\b(?:in|for|at)\s+([A-Za-z\s]+?)(?:\?|\.|\$|$)", prompt, re.IGNORECASE)
+    if m:
+        candidate = m.group(1).strip()
+        # Ensure candidate is not a common question word
+        if candidate.lower() not in ("detail", "advance", "brief", "general", "short", "terms"):
+            return candidate
+    return None
+
+
+def clean_final_user_response(raw_text: str, user_prompt: Optional[str] = None) -> str:
+    """Extract and sanitize strictly the user-facing response from raw LLM output.
+    
+    Guarantees that internal reasoning, planning, unclosed thinking tags,
+    numbered deliberation steps, or debug statements never reach the user,
+    WebSocket stream, Rime TTS, or conversation history.
+    """
+    text = raw_text or ""
+
+    # 1. Unclosed or closed <think> blocks
+    if "<think>" in text:
+        if "</think>" in text:
+            # Drop all content within <think>...</think>
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        else:
+            # Unclosed <think> tag: everything from <think> onward is pure internal reasoning
+            text = text.split("<think>")[0].strip()
+
+    # 2. Check for explicit final answer marker
+    final_sections = re.split(
+        r"\b(?:final answer|final response|spoken answer|assistant response)\s*:\s*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if len(final_sections) > 1:
+        candidate = final_sections[-1].strip()
+        if candidate and not any(m in candidate.lower() for m in _META_MARKERS):
+            text = candidate
+
+    # 3. Clean markdown formatting
+    text = re.sub(r"```(?:text)?\s*(.*?)```", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"[*_#`]", "", text).strip()
+
+    # 4. Split into lines and filter out reasoning lines
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    clean_lines = []
+    for line in lines:
+        lower = line.lower()
+        if any(marker in lower for marker in _META_MARKERS):
+            continue
+        if REASONING_PREFIX_REGEX.match(line) and any(
+            word in lower
+            for word in ["tool", "check", "answer", "input", "prompt", "response", "step", "draft", "constraint", "yes", "no"]
+        ):
+            continue
+        # Strip numbered prefixes if any remaining normal sentence was prefixed
+        cleaned_line = REASONING_PREFIX_REGEX.sub("", line).strip()
+        if cleaned_line:
+            clean_lines.append(cleaned_line)
+
+    result = " ".join(clean_lines).strip()
+    result = re.sub(r"^(?:final polish|final response|answer|response)\s*:\s*", "", result, flags=re.IGNORECASE).strip()
+    result = re.sub(r"\s+", " ", result)
+
+    # 5. If no usable text remained or it still contains meta markers, provide a clean transparent fallback
+    if not result or any(marker in result.lower() for marker in _META_MARKERS):
+        city = extract_city_from_prompt(user_prompt)
+        p_lower = (user_prompt or "").lower()
+        if city and any(w in p_lower for w in ["weather", "temperature", "forecast", "rain", "climate"]):
+            return f"I don't have access to live weather data right now, so I can't provide the current weather in {city}."
+        if any(w in p_lower for w in ["flight", "stock", "live data", "real-time"]):
+            return "I don't have access to live real-time tools right now."
+        return SAFE_FALLBACK_RESPONSE
+
+    return result[:900].rstrip()
+
+
+def _text_from_value(value: Any) -> str:
+    """Read user-facing text from common provider response shapes only."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(_text_from_value(item.get("text") or item.get("content") or item.get("output")))
+        return " ".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ("final", "output", "content", "text", "message"):
+            text = _text_from_value(value.get(key))
+            if text:
+                return text
+    return ""
+
+
+def _extract_user_facing_text(choice: Dict[str, Any]) -> str:
+    """Extract final response fields without ever treating reasoning as speech."""
+    message = choice.get("message")
+    for source in (message, choice):
+        if isinstance(source, dict):
+            for key in ("final", "output", "content", "text"):
+                text = _text_from_value(source.get(key))
+                if text:
+                    return text
+    return ""
+
+
+def _spoken_answer(text: str, user_prompt: Optional[str] = None) -> str:
+    """Extract only a natural final answer from model content before TTS."""
+    cleaned = clean_final_user_response(text, user_prompt=user_prompt)
+    if not cleaned:
+        raise GroqLLMServiceError("Groq returned no usable spoken answer.")
+    return cleaned
 
 
 class GroqLLMServiceError(Exception):
@@ -67,7 +211,9 @@ class GroqLLMService:
             raise GroqLLMServiceError("Cannot generate response: message list is empty.")
 
         target_model = model or self.settings.groq_model
-        sys_prompt = system_prompt if system_prompt is not None else VOICE_SYSTEM_PROMPT
+        sys_prompt = VOICE_SYSTEM_PROMPT
+        if system_prompt and system_prompt.strip():
+            sys_prompt = f"{VOICE_SYSTEM_PROMPT}\nAdditional trusted instruction: {system_prompt.strip()}"
 
         # Build payload
         payload_messages: List[Dict[str, str]] = []
@@ -86,6 +232,14 @@ class GroqLLMService:
         if not payload_messages or (len(payload_messages) == 1 and payload_messages[0]["role"] == "system"):
             raise GroqLLMServiceError("Cannot generate response: no valid user/assistant message content provided.")
 
+        # Determine latest user prompt for context-aware fallback
+        user_prompt = ""
+        for msg in reversed(messages):
+            role = msg["role"] if isinstance(msg, dict) else getattr(msg, "role", "user")
+            if role == "user":
+                user_prompt = msg["content"] if isinstance(msg, dict) else getattr(msg, "content", "")
+                break
+
         headers = {
             "Authorization": f"Bearer {api_key.strip()}",
             "Content-Type": "application/json",
@@ -96,6 +250,7 @@ class GroqLLMService:
             "messages": payload_messages,
             "temperature": float(temperature),
             "max_tokens": int(max_tokens),
+            "reasoning_effort": "none",
         }
 
         start_time = time.perf_counter()
@@ -107,6 +262,13 @@ class GroqLLMService:
                     headers=headers,
                     json=body,
                 )
+                if response.status_code == 400 and "reasoning_effort" in response.text:
+                    body.pop("reasoning_effort", None)
+                    response = await client.post(
+                        self.settings.groq_llm_url,
+                        headers=headers,
+                        json=body,
+                    )
         except httpx.TimeoutException as exc:
             raise GroqLLMServiceError(
                 f"Groq LLM request timed out after {self.timeout}s."
@@ -143,40 +305,29 @@ class GroqLLMService:
             raise GroqLLMServiceError("Groq LLM API returned empty choices in response.")
 
         choice = choices[0]
-        message = choice.get("message", {})
-        text = message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        raw_content = message.get("content") or choice.get("text") or ""
+        reasoning_trace = message.get("reasoning") or message.get("reasoning_content") or ""
+        tool_calls = message.get("tool_calls") or []
 
-        # Clean out any thinking block tokens or reasoning preambles if returned
-        if "<think>" in text:
-            if "</think>" in text:
-                text = text.split("</think>")[-1].strip()
-            else:
-                text = text.replace("<think>", "").strip()
-
-        # Handle reasoning models outputting raw "Thinking Process:" headers
-        for prefix in ["thinking process:", "here's a thinking process:", "here is a thinking process:"]:
-            if prefix in text.lower():
-                paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-                # Select the last non-reasoning paragraph as the final spoken answer
-                candidates = [
-                    p for p in paragraphs
-                    if not p.lower().startswith(("thinking", "here's a thinking", "here is a thinking", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "*", "-"))
-                ]
-                if candidates:
-                    text = candidates[-1]
-                elif paragraphs:
-                    text = paragraphs[-1]
-                break
-
-        if not text:
-            raise GroqLLMServiceError("Groq LLM API returned empty content in message choice.")
+        text = _extract_user_facing_text(choice)
 
         usage = data.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
 
+        # Clean final response strictly separating internal reasoning from user speech
+        final_answer = clean_final_user_response(text or raw_content, user_prompt=user_prompt)
+        if not final_answer:
+            final_answer = SAFE_FALLBACK_RESPONSE
+
         return {
-            "text": text.strip(),
+            "text": final_answer,              # Backward compatibility
+            "response": final_answer,          # Canonical final response
+            "final_response": final_answer,    # Canonical final response
+            "raw_content": raw_content,        # Internal data only
+            "reasoning": reasoning_trace,      # Internal data only
+            "tool_calls": tool_calls,          # Internal data only
             "provider": "groq",
             "model": target_model,
             "prompt_tokens": prompt_tokens,

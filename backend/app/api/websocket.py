@@ -502,7 +502,9 @@ class VoiceWebSocketManager:
                 turn_id=turn_id,
                 event_type=WebSocketEventType.AUDIO_STARTED,
                 data={
-                    "assistant_text": result.assistant_text,
+                    "response": result.final_response,
+                    "final_response": result.final_response,
+                    "assistant_text": result.final_response,
                     "speaker": result.tts_metadata.speaker,
                     "model_id": result.tts_metadata.model_id,
                     "format": result.tts_metadata.audio_format,
@@ -536,7 +538,11 @@ class VoiceWebSocketManager:
                 turn_id=turn_id,
                 event_type=WebSocketEventType.TURN_COMPLETED,
                 data={
-                    "assistant_response": result.assistant_text,
+                    "type": "TURN_COMPLETED",
+                    "turn_id": turn_id,
+                    "response": result.final_response,
+                    "final_response": result.final_response,
+                    "assistant_response": result.final_response,
                     "user_prompt": result.user_prompt,
                     "latency_ms": result.latency_ms,
                     "status": "completed",
