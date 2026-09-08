@@ -1890,7 +1890,9 @@ body {
 @media (max-width: 1024px) {
   .chat-thread-container {
     padding: 20px 8%;
-=======
+  }
+}
+
 /* Microphone Device Selector & Live Level Meter */
 .mic-selection-bar {
   display: flex;
@@ -1979,7 +1981,6 @@ body {
 @media (max-width: 640px) {
   .app-container {
     padding: 16px 12px;
->>>>>>> 7e6ff9a859e5c1884840ed85dec60543104d4048
   }
   .chat-input-wrapper {
     padding: 16px 8% 20px 8%;

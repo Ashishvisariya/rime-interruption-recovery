@@ -118,7 +118,6 @@ export default function App() {
       setErrorMessage(`Microphone test failed: ${err.message}`);
     }
   };
->>>>>>> 7e6ff9a859e5c1884840ed85dec60543104d4048
 
   // Sync VAD callbacks with current React state
   useEffect(() => {
@@ -344,7 +343,6 @@ export default function App() {
         }
         setAgentState(AgentState.RECOVERING);
       } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
-      } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
         const candidateResponse = evt.data?.response || evt.data?.final_response || evt.data?.assistant_response;
         if (candidateResponse) {
           const validatedResponse = sanitizeFinalResponse(candidateResponse);
@@ -357,12 +355,6 @@ export default function App() {
               userPrompt: evt.data?.user_prompt || ttsText,
               assistantResponse: validatedResponse,
               latencyMs: evt.data?.latency_ms,
-              speaker: evt.data?.speaker || 'celeste',
-              status: 'COMPLETED',
-            },
-          ]);
-        }
-              latencyMs: evt.data.latency_ms,
               speaker: evt.data?.speaker || 'celeste',
               status: 'COMPLETED',
             },
