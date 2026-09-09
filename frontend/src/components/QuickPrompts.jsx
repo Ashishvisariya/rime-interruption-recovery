@@ -2,10 +2,13 @@ import React from 'react';
 import { IconSparkles } from './Icons.jsx';
 
 const SUGGESTIONS = [
-  "Latest AI news",
-  "Weather in Delhi",
-  "Explain quantum computing",
-  "Tell me a joke",
+  "Explain this",
+  "Summarize",
+  "Search web",
+  "Compare",
+  "Tell me more",
+  "Translate",
+  "Help me plan",
 ];
 
 export default function QuickPrompts({ onSelectPrompt, disabled }) {

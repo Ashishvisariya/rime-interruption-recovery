@@ -5,11 +5,15 @@ Enforces credential isolation, connection timeouts, audio format flexibility,
 and quota preservation with zero automatic retry loops.
 """
 
+import logging
+import time
 from typing import Optional
 import httpx
 
 from backend.app.config import Settings, get_settings
 from backend.app.models.schemas import TranscriptionResponse
+
+logger = logging.getLogger(__name__)
 
 
 class STTError(Exception):
@@ -75,8 +79,35 @@ class GroqSTTService:
             "Authorization": f"Bearer {api_key.strip()}",
         }
 
+        # 1. Determine actual audio container & format from magic bytes
+        detected_ext = None
+        detected_mime = None
+        if audio_bytes.startswith(b"RIFF") and b"WAVE" in audio_bytes[:16]:
+            detected_ext, detected_mime = "wav", "audio/wav"
+        elif audio_bytes.startswith(b"\x1a\x45\xdf\xa3"):
+            detected_ext, detected_mime = "webm", "audio/webm"
+        elif audio_bytes.startswith(b"OggS"):
+            detected_ext, detected_mime = "ogg", "audio/ogg"
+        elif audio_bytes.startswith(b"ID3") or audio_bytes.startswith(b"\xff\xfb") or audio_bytes.startswith(b"\xff\xf3") or audio_bytes.startswith(b"\xff\xf2"):
+            detected_ext, detected_mime = "mp3", "audio/mpeg"
+        elif len(audio_bytes) > 8 and audio_bytes[4:8] == b"ftyp":
+            detected_ext, detected_mime = "m4a", "audio/mp4"
+
+        # Resolve filename and mime type to match the real format
+        if detected_ext and detected_mime:
+            resolved_ext = filename.split(".")[-1].lower() if "." in filename else ""
+            resolved_filename = filename if resolved_ext == detected_ext else f"audio.{detected_ext}"
+            resolved_mime = detected_mime
+        else:
+            resolved_filename = filename or "audio.webm"
+            resolved_mime = mime_type or "audio/webm"
+
+        # Minimal required logs: [STT] mime= [STT] bytes= [STT] filename=
+        logger.info(f"[STT] mime={resolved_mime} bytes={len(audio_bytes)} filename={resolved_filename}")
+        print(f"[STT] mime={resolved_mime} bytes={len(audio_bytes)} filename={resolved_filename}")
+
         files = {
-            "file": (filename, audio_bytes, mime_type),
+            "file": (resolved_filename, audio_bytes, resolved_mime),
         }
         data = {
             "model": resolved_model,
@@ -92,6 +123,7 @@ class GroqSTTService:
             client = httpx.AsyncClient(timeout=self._timeout)
             created_client = True
 
+        t_start = time.perf_counter()
         try:
             response = await client.post(
                 api_url,
@@ -120,6 +152,8 @@ class GroqSTTService:
 
             res_json = response.json()
             transcribed_text = res_json.get("text", "").strip()
+            latency_ms = (time.perf_counter() - t_start) * 1000.0
+            logger.info(f"[STT] stt_completed: turn_id={turn_id}, transcript='{transcribed_text}', latency_ms={latency_ms:.1f}")
 
             return TranscriptionResponse(
                 session_id=session_id,

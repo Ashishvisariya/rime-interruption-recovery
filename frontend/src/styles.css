@@ -1249,38 +1249,54 @@ body {
   font-size: 0.85rem;
 }
 
-/* Quick Prompts Suggestions */
+/* Quick Prompts Suggestions (Compact) */
 .quick-prompts-section {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+
+.quick-prompts-section::-webkit-scrollbar {
+  display: none;
 }
 
 .quick-prompts-title {
-  font-size: 0.8rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .quick-prompts-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.quick-prompts-list::-webkit-scrollbar {
+  display: none;
 }
 
 .chip-suggestion {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-card);
   color: var(--text-secondary);
-  padding: 8px 14px;
+  padding: 4px 10px;
   border-radius: 9999px;
-  font-size: 0.85rem;
+  font-size: 0.76rem;
   cursor: pointer;
+  white-space: nowrap;
   transition: all 0.2s ease;
 }
 
@@ -1694,11 +1710,11 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 14px 18px;
+  gap: 4px;
+  padding: 8px 14px;
   border-radius: var(--radius-md);
-  line-height: 1.55;
-  font-size: 0.95rem;
+  line-height: 1.45;
+  font-size: 0.88rem;
 }
 
 .user-bubble-content {
@@ -1721,13 +1737,13 @@ body {
 .msg-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-bottom: 2px;
 }
 
 .msg-author {
   font-weight: 600;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: var(--text-primary);
 }
 
@@ -1741,21 +1757,47 @@ body {
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
+  font-size: 0.88rem;
+  line-height: 1.45;
 }
 
 .msg-meta {
   font-size: 0.72rem;
   color: var(--text-muted);
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
-/* 4. Bottom Modern Floating Input Bar */
+/* Assistant Message Latency - One Small Inline Row */
+.msg-latency-row {
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.msg-latency-row .latency-total {
+  color: #facc15;
+  font-weight: 600;
+}
+
+.msg-latency-row .latency-part {
+  color: #94a3b8;
+}
+
+/* 4. Bottom Modern Floating Input Bar (Compact) */
 .chat-input-wrapper {
-  padding: 16px 20% 24px 20%;
+  padding: 4px 18% 10px 18%;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  background: linear-gradient(180deg, transparent 0%, var(--bg-primary) 30%);
+  gap: 6px;
+  background: linear-gradient(180deg, transparent 0%, var(--bg-primary) 35%);
   flex-shrink: 0;
   z-index: 40;
 }
@@ -1763,13 +1805,13 @@ body {
 .chat-input-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border-card);
   border-radius: 9999px;
-  padding: 8px 12px 8px 16px;
+  padding: 4px 8px 4px 14px;
   backdrop-filter: blur(16px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   transition: border-color 0.2s ease;
 }
 
@@ -2171,6 +2213,214 @@ body {
   max-width: 500px;
   height: 50px;
 }
+
+/* =========================================================================
+   Clean Round AI Button & Voice-First UI (Compact)
+   ========================================================================= */
+.round-ai-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 2px 0;
+  margin: 0 auto;
+}
+
+.round-ai-outer-wrap {
+  position: relative;
+  width: 68px;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.round-ai-btn {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+  background: var(--bg-card);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.round-ai-btn:hover {
+  transform: scale(1.06);
+}
+
+.round-ai-btn:active {
+  transform: scale(0.95);
+}
+
+.round-ai-inner-circle {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.25s ease;
+}
+
+/* 1. IDLE STATE */
+.round-ai-idle .round-ai-inner-circle {
+  border-color: rgba(148, 163, 184, 0.2);
+}
+.round-ai-idle:hover .round-ai-inner-circle {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.3);
+}
+
+/* 2. LISTENING STATE (Cyan Glowing Pulsing Halo) */
+.round-ai-listening {
+  background: radial-gradient(circle, #0891b2 0%, #0e7490 100%);
+  box-shadow: 0 0 24px rgba(6, 182, 212, 0.6);
+}
+
+.round-ai-listening .round-ai-inner-circle {
+  border-color: rgba(6, 182, 212, 0.8);
+  background: rgba(8, 145, 178, 0.25);
+}
+
+.round-ai-halo-listening {
+  position: absolute;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: 2px solid rgba(6, 182, 212, 0.6);
+  background: radial-gradient(circle, rgba(6, 182, 212, 0.25) 0%, transparent 70%);
+  animation: listeningPulse 1.8s infinite ease-out;
+  pointer-events: none;
+  z-index: 1;
+  transition: transform 0.1s ease;
+}
+
+@keyframes listeningPulse {
+  0% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.22); opacity: 0.4; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+/* 3. THINKING STATE (Purple / Indigo Rotating Aura) */
+.round-ai-thinking {
+  background: radial-gradient(circle, #7c3aed 0%, #4f46e5 100%);
+  box-shadow: 0 0 24px rgba(139, 92, 246, 0.6);
+}
+
+.round-ai-thinking .round-ai-inner-circle {
+  border-color: rgba(139, 92, 246, 0.8);
+  background: rgba(124, 58, 237, 0.25);
+}
+
+.round-ai-halo-thinking {
+  position: absolute;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: 2px dashed rgba(139, 92, 246, 0.7);
+  animation: thinkingSpin 3s linear infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+
+@keyframes thinkingSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 4. SPEAKING STATE (Emerald Acoustic Waves) */
+.round-ai-speaking {
+  background: radial-gradient(circle, #059669 0%, #047857 100%);
+  box-shadow: 0 0 28px rgba(16, 185, 129, 0.7);
+}
+
+.round-ai-speaking .round-ai-inner-circle {
+  border-color: rgba(16, 185, 129, 0.8);
+  background: rgba(5, 150, 105, 0.25);
+}
+
+.round-ai-halo-speaking {
+  position: absolute;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: 2px solid rgba(16, 185, 129, 0.8);
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.2) 0%, transparent 70%);
+  animation: speakingRipple 1.2s infinite ease-in-out;
+  pointer-events: none;
+  z-index: 1;
+}
+
+@keyframes speakingRipple {
+  0% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.18); opacity: 0.3; }
+  100% { transform: scale(1); opacity: 0.8; }
+}
+
+/* Status Pill */
+.round-ai-status-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 9999px;
+  letter-spacing: 0.02em;
+  transition: all 0.2s ease;
+}
+
+.status-pill .status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pill-idle {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-muted);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.pill-listening {
+  background: rgba(6, 182, 212, 0.15);
+  color: var(--accent-cyan);
+  border: 1px solid var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.25);
+}
+
+.pill-thinking {
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  border: 1px solid #8b5cf6;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.25);
+}
+
+.pill-speaking {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--accent-emerald);
+  border: 1px solid var(--accent-emerald);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
+}
+
+
 
 
 

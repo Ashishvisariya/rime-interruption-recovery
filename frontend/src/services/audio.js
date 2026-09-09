@@ -75,6 +75,11 @@ export class AudioPlaybackManager {
 
       if (this.state === PlaybackState.READY || this.state === PlaybackState.LOADING) {
         this._transitionTo(PlaybackState.PLAYING);
+        if (this.currentAudio?.onStart) {
+          try {
+            this.currentAudio.onStart(this.currentAudio);
+          } catch (e) {}
+        }
         this._emitEvent(AudioEventType.AUDIO_PLAY_STARTED, {
           sessionId: this.currentAudio?.sessionId,
           turnId: this.currentAudio?.turnId,
@@ -263,6 +268,70 @@ export class AudioPlaybackManager {
   }
 
   /**
+   * Enqueue or immediately play a streaming audio chunk for an active turn.
+   * Discards stale chunks immediately if turnId < activeTurnId.
+   * @param {number} turnId
+   * @param {string|Blob} audioChunk - Base64 string, Blob, or Object URL
+   * @param {Object} [metadata]
+   * @param {Function} [onStart] - Optional callback fired when audio chunk physically starts playing
+   * @returns {boolean}
+   */
+  queueAudioChunk(turnId, audioChunk, metadata = {}, onStart = null) {
+    if (turnId < this.activeTurnId) {
+      this._emitEvent(AudioEventType.AUDIO_DISCARDED, {
+        sessionId: this.activeSessionId,
+        turnId,
+        details: { reason: `Rejected stale audio chunk (turn ${turnId} < active ${this.activeTurnId})` },
+      });
+      return false;
+    }
+
+    let audioSource = audioChunk;
+    if (typeof audioChunk === 'string' && !audioChunk.startsWith('blob:') && !audioChunk.startsWith('http') && !audioChunk.startsWith('data:')) {
+      try {
+        const binary = atob(audioChunk);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const format = metadata.format || 'mp3';
+        const mime = format === 'mp3' ? 'audio/mpeg' : `audio/${format}`;
+        audioSource = new Blob([bytes], { type: mime });
+      } catch (e) {
+        console.error('Failed to convert base64 audio chunk to blob:', e);
+        return false;
+      }
+    }
+
+    const item = {
+      sessionId: this.activeSessionId,
+      turnId,
+      audioSource,
+      metadata,
+      onStart,
+      chunkIndex: metadata.chunk_index !== undefined ? metadata.chunk_index : (metadata.chunkIndex || 0),
+      isFinal: metadata.is_final !== undefined ? metadata.is_final : false,
+    };
+
+    if (this.state === PlaybackState.IDLE) {
+      this.playAudio(item);
+      return true;
+    }
+
+    if (this.currentAudio && this.currentAudio.turnId === turnId) {
+      this.queue.push(item);
+      return true;
+    }
+
+    if (this.currentAudio && this.currentAudio.turnId < turnId) {
+      this.stopCurrentAudio('turn_superseded');
+      this.playAudio(item);
+      return true;
+    }
+
+    this.queue.push(item);
+    return true;
+  }
+
+  /**
    * Immediately play or schedule an audio item.
    * @param {Object} item
    * @returns {Promise<boolean>}
@@ -353,6 +422,9 @@ export class AudioPlaybackManager {
           turnId: item.turnId,
         });
         this._transitionTo(PlaybackState.PLAYING);
+        if (item.onStart) {
+          try { item.onStart(item); } catch (e) {}
+        }
         this._emitEvent(AudioEventType.AUDIO_PLAY_STARTED, {
           sessionId: item.sessionId,
           turnId: item.turnId,
@@ -508,6 +580,18 @@ export class AudioPlaybackManager {
       } : null,
       queueLength: this.queue.length,
     };
+  }
+
+  /**
+   * Returns true if audio is actively playing or queued to play.
+   * Directly queries the underlying HTMLAudioElement and internal queue for zero-latency detection.
+   * @returns {boolean}
+   */
+  isPlaying() {
+    const isPlayingState = this.state === PlaybackState.PLAYING || this.state === PlaybackState.LOADING || this.state === PlaybackState.READY;
+    const hasActiveAudio = Boolean(this.audio && !this.audio.paused && !this.audio.ended && this.audio.currentTime > 0);
+    const hasQueue = this.queue.length > 0;
+    return isPlayingState || hasActiveAudio || hasQueue;
   }
 }
 

@@ -13,9 +13,12 @@ Preserves strict turn ownership and stale-result protection at every asynchronou
 """
 
 import asyncio
+import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from backend.app.core.cancellation import CancellationManager, default_cancellation_manager
 from backend.app.services.stt import GroqSTTService, default_stt_service, STTError
@@ -290,6 +293,17 @@ class VoiceAgentOrchestrator:
                 max_messages=8,
             )
 
+            # Strict invariant guard: LLM request must ALWAYS contain at least one user message
+            if not llm_messages or not any(m.get("role") == "user" for m in llm_messages):
+                llm_messages.append({"role": "user", "content": user_prompt_text})
+
+            last_msg = llm_messages[-1]
+            logger.info(
+                f"[PIPELINE] turn_id={current_turn_id} transcript='{user_prompt_text}' "
+                f"message_count={len(llm_messages)} last_message_role={last_msg.get('role')} "
+                f"last_message_content_length={len(last_msg.get('content', ''))}"
+            )
+
             # Step 5: Groq LLM Response Generation
             effective_system_prompt = system_prompt or ""
             if search_context_text:
@@ -370,6 +384,271 @@ class VoiceAgentOrchestrator:
             )
         except asyncio.CancelledError:
             # Cancellation requested: do not mutate conversation history, clean up and re-raise
+            raise
+        finally:
+            if current_task is not None:
+                self.cancellation_manager.unregister_task(
+                    session_id=current_session_id,
+                    turn_id=current_turn_id,
+                    task_or_id=current_task,
+                )
+
+    async def process_turn_stream(
+        self,
+        session_id: Optional[str] = None,
+        turn_id: Optional[int] = None,
+        audio_bytes: Optional[bytes] = None,
+        text_prompt: Optional[str] = None,
+        audio_filename: str = "audio.webm",
+        audio_mime_type: str = "audio/webm",
+        language: str = "en",
+        system_prompt: Optional[str] = None,
+        speaker: Optional[str] = None,
+        model_id: Optional[str] = None,
+        audio_format: Optional[str] = "mp3",
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream an end-to-end voice agent turn with incremental sentence-chunk synthesis for minimal latency."""
+        start_time = time.perf_counter()
+
+        session = self.conversation_manager.get_or_create_session(session_id)
+        current_session_id = session.session_id
+
+        if not session.is_active:
+            raise SessionClosedError(f"Session '{current_session_id}' is closed.")
+
+        if turn_id is None:
+            current_turn_id = self.conversation_manager.create_turn(current_session_id, prompt=text_prompt)
+        else:
+            current_turn_id = turn_id
+            if not session.validate_turn(current_turn_id):
+                raise VoiceAgentStaleTurnError(
+                    f"Turn {current_turn_id} is not active on session '{current_session_id}' (active: {session.active_turn_id}).",
+                    session_id=current_session_id,
+                    turn_id=current_turn_id,
+                )
+            if text_prompt:
+                if not any(m.turn_id == current_turn_id and m.role == "user" for m in session.messages):
+                    session.append_user_message(current_turn_id, text_prompt)
+
+        current_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+
+        if current_task is not None:
+            self.cancellation_manager.register_task(
+                session_id=current_session_id,
+                turn_id=current_turn_id,
+                task=current_task,
+                task_type="agent_turn_stream",
+            )
+
+        stt_latency_ms = 0.0
+        try:
+            user_prompt_text = text_prompt or ""
+            if audio_bytes and len(audio_bytes) > 0:
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded before STT transcription.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+
+                t_stt_start = time.perf_counter()
+                try:
+                    stt_result = await self.stt_service.transcribe(
+                        audio_bytes=audio_bytes,
+                        filename=audio_filename,
+                        mime_type=audio_mime_type,
+                        language=language,
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+                    user_prompt_text = stt_result.text.strip()
+                    stt_latency_ms = (time.perf_counter() - t_stt_start) * 1000.0
+                except STTError as e:
+                    raise VoiceAgentOrchestrationError(f"STT Failure: {str(e)}", status_code=502)
+                except ValueError as e:
+                    raise VoiceAgentOrchestrationError(f"Invalid STT Input: {str(e)}", status_code=400)
+
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded during STT transcription.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+
+                silence_hallucinations = {
+                    "you", "you.", "you!", "you?",
+                    "thank you for watching", "thank you for watching.",
+                    "captioning by", "subtitles by",
+                }
+                if user_prompt_text.lower().strip() in silence_hallucinations:
+                    raise VoiceAgentOrchestrationError(
+                        "No speech detected. The audio was silent or unclear. Please check your microphone and speak again.",
+                        status_code=400,
+                    )
+
+                turn = session.get_turn(current_turn_id)
+                if turn and not turn.prompt:
+                    turn.prompt = user_prompt_text
+                if not any(m.turn_id == current_turn_id and m.role == "user" for m in session.messages):
+                    session.append_user_message(current_turn_id, user_prompt_text)
+
+                yield {
+                    "type": "TRANSCRIPT",
+                    "transcript": user_prompt_text,
+                    "stt_latency_ms": round(stt_latency_ms, 2),
+                }
+
+            if not user_prompt_text or not user_prompt_text.strip():
+                raise VoiceAgentOrchestrationError("No speech detected or transcript was empty. Please speak clearly into your microphone.", status_code=400)
+
+            # Ensure user message is registered on session turn and message history for text prompts
+            turn = session.get_turn(current_turn_id)
+            if turn and not turn.prompt:
+                turn.prompt = user_prompt_text
+            if not any(m.turn_id == current_turn_id and m.role == "user" for m in session.messages):
+                session.append_user_message(current_turn_id, user_prompt_text)
+
+            search_used = False
+            search_sources = []
+            search_context_text = ""
+
+            if is_search_query(user_prompt_text):
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded before web search.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+                try:
+                    search_res = await self.tavily_service.search(
+                        query=user_prompt_text,
+                        max_results=3,
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+                    if not session.validate_turn(current_turn_id):
+                        raise VoiceAgentStaleTurnError(
+                            f"Turn {current_turn_id} superseded during web search.",
+                            session_id=current_session_id,
+                            turn_id=current_turn_id,
+                        )
+                    if search_res.results:
+                        search_used = True
+                        search_sources = [r.url for r in search_res.results if r.url]
+                        search_context_text = format_search_context(user_prompt_text, search_res.results)
+                except VoiceAgentStaleTurnError:
+                    raise
+                except Exception:
+                    search_context_text = "Note: Live web search was temporarily unavailable for this query."
+
+            llm_messages = session.get_context_for_llm(
+                system_prompt=system_prompt,
+                max_messages=8,
+            )
+
+            # Strict invariant guard: LLM request must ALWAYS contain at least one user message
+            if not llm_messages or not any(m.get("role") == "user" for m in llm_messages):
+                llm_messages.append({"role": "user", "content": user_prompt_text})
+
+            last_msg = llm_messages[-1]
+            logger.info(
+                f"[PIPELINE] turn_id={current_turn_id} transcript='{user_prompt_text}' "
+                f"message_count={len(llm_messages)} last_message_role={last_msg.get('role')} "
+                f"last_message_content_length={len(last_msg.get('content', ''))}"
+            )
+
+            effective_system_prompt = system_prompt or ""
+            if search_context_text:
+                effective_system_prompt = f"{effective_system_prompt}\n\n{search_context_text}".strip()
+
+            full_response_text = ""
+            first_audio_emitted = False
+
+            async for chunk in self.llm_service.generate_stream(
+                messages=llm_messages,
+                system_prompt=effective_system_prompt if effective_system_prompt else None,
+            ):
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded during generation stream.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+
+                chunk_text = chunk.get("chunk_text", "").strip()
+                if not chunk_text:
+                    continue
+
+                full_response_text = (full_response_text + " " + chunk_text).strip()
+
+                t_tts_start = time.perf_counter()
+                try:
+                    audio_bytes_out, tts_metadata = await self.rime_service.synthesize(
+                        text=chunk_text,
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                        speaker=speaker,
+                        model_id=model_id,
+                        audio_format=audio_format,
+                    )
+                except RimeTTSError as e:
+                    status_code = 502 if (e.status_code is None or e.status_code >= 500) else e.status_code
+                    raise VoiceAgentOrchestrationError(f"Rime TTS Failure: {str(e)}", status_code=status_code)
+                except ValueError as e:
+                    raise VoiceAgentOrchestrationError(f"Invalid TTS Input: {str(e)}", status_code=400)
+
+                if not session.validate_turn(current_turn_id):
+                    raise VoiceAgentStaleTurnError(
+                        f"Turn {current_turn_id} superseded during Rime TTS chunk synthesis.",
+                        session_id=current_session_id,
+                        turn_id=current_turn_id,
+                    )
+
+                tts_chunk_ms = (time.perf_counter() - t_tts_start) * 1000.0
+                ttfa_ms = None
+                if not first_audio_emitted:
+                    ttfa_ms = (time.perf_counter() - start_time) * 1000.0
+                    first_audio_emitted = True
+
+                yield {
+                    "type": "AUDIO_CHUNK",
+                    "chunk_index": chunk.get("chunk_index", 0),
+                    "text": chunk_text,
+                    "audio_bytes": audio_bytes_out,
+                    "audio_format": tts_metadata.audio_format,
+                    "speaker": tts_metadata.speaker,
+                    "model_id": tts_metadata.model_id,
+                    "is_final": chunk.get("is_final", False),
+                    "stt_latency_ms": round(stt_latency_ms, 2),
+                    "llm_ttft_ms": chunk.get("ttft_ms"),
+                    "tts_chunk_ms": round(tts_chunk_ms, 2),
+                    "ttfa_ms": round(ttfa_ms, 2) if ttfa_ms else None,
+                }
+
+            if not full_response_text:
+                full_response_text = SAFE_FALLBACK_RESPONSE
+
+            session.mark_turn_completed(
+                turn_id=current_turn_id,
+                assistant_response=full_response_text,
+            )
+
+            total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+            yield {
+                "type": "TURN_COMPLETED",
+                "user_prompt": user_prompt_text,
+                "final_response": full_response_text,
+                "total_latency_ms": round(total_latency_ms, 2),
+                "stt_latency_ms": round(stt_latency_ms, 2),
+                "search_used": search_used,
+                "search_sources": search_sources,
+            }
+
+        except asyncio.CancelledError:
             raise
         finally:
             if current_task is not None:

@@ -291,8 +291,26 @@ class VoiceWebSocketManager:
         # 4. SPEECH_ENDED / AUDIO_END -> Trigger Full Voice Pipeline
         # -------------------------------------------------------------
         elif event_type in (WebSocketEventType.SPEECH_ENDED, "AUDIO_END"):
-            audio_accum = bytes(self._audio_buffers.get(session_id, b""))
+            chunk_b64 = event_data.get("audio_bytes_b64") or event_data.get("audio_b64")
+            if chunk_b64:
+                try:
+                    audio_accum = base64.b64decode(chunk_b64)
+                except Exception:
+                    audio_accum = bytes(self._audio_buffers.get(session_id, b""))
+            else:
+                audio_accum = bytes(self._audio_buffers.get(session_id, b""))
             self._audio_buffers[session_id] = bytearray()  # Reset buffer
+
+            if (not audio_accum or len(audio_accum) < 100) and not event_data.get("prompt"):
+                logger.info(f"[WEBSOCKET] Empty audio payload in SPEECH_ENDED for session {session_id}.")
+                await self.send_event(
+                    websocket=websocket,
+                    session_id=session_id,
+                    turn_id=session.active_turn_id,
+                    event_type=WebSocketEventType.ERROR,
+                    data={"error": "No speech detected. The audio was silent or unclear."},
+                )
+                return
 
             # Create or advance active turn
             new_turn_id = self._conversation.create_turn(session_id)
@@ -327,7 +345,13 @@ class VoiceWebSocketManager:
         # 5. TEXT_PROMPT -> Text-driven Pipeline
         # -------------------------------------------------------------
         elif event_type == WebSocketEventType.TEXT_PROMPT:
-            prompt_text = event_data.get("text", "").strip()
+            prompt_text = (
+                event_data.get("text")
+                or msg.get("text")
+                or event_data.get("prompt")
+                or msg.get("prompt")
+                or ""
+            ).strip()
             if not prompt_text:
                 await self.send_event(
                     websocket=websocket,
@@ -467,88 +491,114 @@ class VoiceWebSocketManager:
                     validate_turn=True,
                 )
 
-            # Execute pipeline
-            result = await self._orchestrator.process_turn(
+            # Execute streaming pipeline:
+            # - Incremental STT transcript emission
+            # - Incremental sentence chunk generation & immediate Rime TTS synthesis
+            # - Incremental audio chunk dispatch for instant browser playback
+            # - Real-time latency measurement emission
+            first_chunk_sent = False
+            async for chunk in self._orchestrator.process_turn_stream(
                 session_id=session_id,
                 turn_id=turn_id,
                 audio_bytes=audio_bytes,
                 text_prompt=text_prompt,
                 speaker=speaker,
                 model_id=model_id,
-            )
+            ):
+                chunk_type = chunk.get("type")
+                if chunk_type == "TURN_COMPLETED":
+                    if turn_id != session.active_turn_id:
+                        logger.info(f"Turn {turn_id} superseded before completion. Dropping outputs.")
+                        return
+                else:
+                    if not session.validate_turn(turn_id):
+                        logger.info(f"Turn {turn_id} superseded during streaming pipeline execution. Dropping outputs.")
+                        return
+                if chunk_type == "TRANSCRIPT":
+                    await self.send_event(
+                        websocket=websocket,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        event_type=WebSocketEventType.TRANSCRIPT,
+                        data={
+                            "transcript": chunk.get("transcript", ""),
+                            "is_final": True,
+                            "stt_latency_ms": chunk.get("stt_latency_ms", 0.0),
+                        },
+                        validate_turn=True,
+                    )
+                elif chunk_type == "AUDIO_CHUNK":
+                    audio_raw = chunk.get("audio_bytes", b"")
+                    audio_b64 = base64.b64encode(audio_raw).decode("utf-8") if audio_raw else ""
+                    chunk_text = chunk.get("text", "")
 
-            # 2. Post-execution validation gate (rejection of superseded turns)
-            if not session.validate_turn(turn_id):
-                logger.info(f"Turn {turn_id} superseded during pipeline execution. Dropping outputs.")
-                return
+                    if not first_chunk_sent:
+                        first_chunk_sent = True
+                        await self.send_event(
+                            websocket=websocket,
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            event_type=WebSocketEventType.AUDIO_STARTED,
+                            data={
+                                "response": chunk_text,
+                                "final_response": chunk_text,
+                                "assistant_text": chunk_text,
+                                "speaker": chunk.get("speaker", speaker or "celeste"),
+                                "model_id": chunk.get("model_id", model_id or "coda"),
+                                "format": chunk.get("audio_format", "mp3"),
+                                "bytes_length": len(audio_raw),
+                                "latency_ms": chunk.get("ttfa_ms") or chunk.get("tts_chunk_ms", 0.0),
+                                "ttfa_ms": chunk.get("ttfa_ms"),
+                                "stt_latency_ms": chunk.get("stt_latency_ms"),
+                                "llm_ttft_ms": chunk.get("llm_ttft_ms"),
+                                "tts_chunk_ms": chunk.get("tts_chunk_ms"),
+                            },
+                            validate_turn=True,
+                        )
 
-            # Send user transcript
-            await self.send_event(
-                websocket=websocket,
-                session_id=session_id,
-                turn_id=turn_id,
-                event_type=WebSocketEventType.TRANSCRIPT,
-                data={
-                    "transcript": result.user_prompt,
-                    "is_final": True,
-                },
-                validate_turn=True,
-            )
-
-            # Send AUDIO_STARTED metadata
-            await self.send_event(
-                websocket=websocket,
-                session_id=session_id,
-                turn_id=turn_id,
-                event_type=WebSocketEventType.AUDIO_STARTED,
-                data={
-                    "response": result.final_response,
-                    "final_response": result.final_response,
-                    "assistant_text": result.final_response,
-                    "speaker": result.tts_metadata.speaker,
-                    "model_id": result.tts_metadata.model_id,
-                    "format": result.tts_metadata.audio_format,
-                    "bytes_length": len(result.audio_bytes),
-                    "latency_ms": result.latency_ms,
-                },
-                validate_turn=True,
-            )
-
-            # Send binary/base64 AUDIO_DATA payload
-            audio_b64 = base64.b64encode(result.audio_bytes).decode("utf-8")
-            await self.send_event(
-                websocket=websocket,
-                session_id=session_id,
-                turn_id=turn_id,
-                event_type=WebSocketEventType.AUDIO_DATA,
-                data={
-                    "audio_b64": audio_b64,
-                    "format": result.tts_metadata.audio_format,
-                    "speaker": result.tts_metadata.speaker,
-                    "model_id": result.tts_metadata.model_id,
-                    "bytes_length": len(result.audio_bytes),
-                },
-                validate_turn=True,
-            )
-
-            # Send TURN_COMPLETED
-            await self.send_event(
-                websocket=websocket,
-                session_id=session_id,
-                turn_id=turn_id,
-                event_type=WebSocketEventType.TURN_COMPLETED,
-                data={
-                    "type": "TURN_COMPLETED",
-                    "turn_id": turn_id,
-                    "response": result.final_response,
-                    "final_response": result.final_response,
-                    "assistant_response": result.final_response,
-                    "user_prompt": result.user_prompt,
-                    "latency_ms": result.latency_ms,
-                    "status": "completed",
-                },
-                validate_turn=True,
-            )
+                    await self.send_event(
+                        websocket=websocket,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        event_type=WebSocketEventType.AUDIO_DATA,
+                        data={
+                            "audio_b64": audio_b64,
+                            "audio_chunk": audio_b64,
+                            "chunk_index": chunk.get("chunk_index", 0),
+                            "text_chunk": chunk_text,
+                            "is_final": chunk.get("is_final", False),
+                            "format": chunk.get("audio_format", "mp3"),
+                            "speaker": chunk.get("speaker", speaker or "celeste"),
+                            "model_id": chunk.get("model_id", model_id or "coda"),
+                            "bytes_length": len(audio_raw),
+                            "ttfa_ms": chunk.get("ttfa_ms"),
+                            "stt_latency_ms": chunk.get("stt_latency_ms"),
+                            "llm_ttft_ms": chunk.get("llm_ttft_ms"),
+                            "tts_chunk_ms": chunk.get("tts_chunk_ms"),
+                        },
+                        validate_turn=True,
+                    )
+                elif chunk_type == "TURN_COMPLETED":
+                    await self.send_event(
+                        websocket=websocket,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        event_type=WebSocketEventType.TURN_COMPLETED,
+                        data={
+                            "type": "TURN_COMPLETED",
+                            "turn_id": turn_id,
+                            "response": chunk.get("final_response", ""),
+                            "final_response": chunk.get("final_response", ""),
+                            "assistant_response": chunk.get("final_response", ""),
+                            "user_prompt": chunk.get("user_prompt", ""),
+                            "latency_ms": chunk.get("total_latency_ms", 0.0),
+                            "total_latency_ms": chunk.get("total_latency_ms", 0.0),
+                            "stt_latency_ms": chunk.get("stt_latency_ms", 0.0),
+                            "search_used": chunk.get("search_used", False),
+                            "status": "completed",
+                        },
+                        validate_turn=False,
+                    )
 
         except asyncio.CancelledError:
             # Clean task cancellation: do not send error or mutate state

@@ -83,6 +83,7 @@ export default function App() {
   const [isDevMode, setIsDevMode] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [metricAE2eLatencyMs, setMetricAE2eLatencyMs] = useState(null);
+  const [lastTurnLatency, setLastTurnLatency] = useState(null);
   // Audio device state & microphone testing
   const [micLevel, setMicLevel] = useState(0);
   const [audioDevices, setAudioDevices] = useState([]);
@@ -94,6 +95,7 @@ export default function App() {
   const testIntervalRef = React.useRef(null);
   const testCtxRef = React.useRef(null);
   const abandonmentTimerRef = React.useRef(null);
+  const speechEndTimeRef = React.useRef(null);
 
   // Enumerate input devices on mount
   useEffect(() => {
@@ -185,10 +187,30 @@ export default function App() {
     }
   }, [conversationTurns, sessionId]);
 
-  // Sync VAD callbacks with current React state
+  // Sync VAD callbacks with audio playback manager & recorder for zero-latency barge-in
   useEffect(() => {
+    defaultVAD.isAudioPlaying = () => defaultPlaybackManager.isPlaying();
     defaultVAD.getAssistantState = () => agentState;
     defaultVAD.getSessionContext = () => ({ sessionId, activeTurnId });
+    defaultVAD.onSpeechOnset = () => {
+      if (defaultRecorder.mediaStream && defaultRecorder.mediaStream.active) {
+        if (!defaultRecorder._isCapturingUtterance) {
+          defaultRecorder.beginUtterance();
+        }
+      }
+    };
+    defaultVAD.onSpeechCancel = () => {
+      if (defaultRecorder._isCapturingUtterance && !defaultVAD.isSpeaking) {
+        defaultRecorder.audioChunks = [];
+        defaultRecorder._isCapturingUtterance = false;
+      }
+    };
+    defaultVAD.onBargeIn = ({ previousTurnId, newTurnId }) => {
+      // BARGE-IN AT VAD/AUDIO LEVEL FIRST: Stop audio immediately and advance turn!
+      defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
+      defaultPlaybackManager.setActiveTurn(newTurnId);
+      setActiveTurnId(newTurnId);
+    };
   }, [agentState, sessionId, activeTurnId]);
 
   // Connect / Reconnect Helper
@@ -264,23 +286,70 @@ export default function App() {
           clearTimeout(abandonmentTimerRef.current);
           abandonmentTimerRef.current = null;
         }
-        if (defaultRecorder.state !== RecorderState.RECORDING && !isProcessing) {
-          try {
-            await defaultRecorder.startRecording(selectedDeviceId || null, defaultVAD.getMediaStream());
-            setAgentState(AgentState.LISTENING);
-          } catch (e) {
-            console.error('Failed to start recorder on VAD speech onset:', e);
+        if (!isProcessing) {
+          if (defaultRecorder.mediaRecorder && defaultRecorder.mediaRecorder.state === 'recording') {
+            if (typeof defaultRecorder.beginUtterance === 'function') {
+              defaultRecorder.beginUtterance();
+            }
+          } else if (defaultRecorder.state !== RecorderState.RECORDING) {
+            try {
+              await defaultRecorder.startRecording(selectedDeviceId || null, defaultVAD.getMediaStream());
+            } catch (e) {
+              console.error('Failed to start recorder on VAD speech onset:', e);
+            }
           }
+          setAgentState(AgentState.LISTENING);
         }
       } else if (evt.eventType === VADEventType.SPEECH_ENDED) {
-        if (defaultRecorder.state === RecorderState.RECORDING) {
+        if (defaultRecorder.state === RecorderState.RECORDING || defaultRecorder._isCapturingUtterance) {
           const t_speech_end = Date.now();
+          speechEndTimeRef.current = t_speech_end;
           try {
-            const recResult = await defaultRecorder.stopRecording();
-            if (recResult && recResult.blob && recResult.blob.size > 0) {
-              setIsProcessing(true);
-              setAgentState(AgentState.TRANSCRIBING);
+            let recResult;
+            if (typeof defaultRecorder.endUtterance === 'function' && defaultRecorder._isCapturingUtterance) {
+              recResult = await defaultRecorder.endUtterance();
+            } else {
+              recResult = await defaultRecorder.stopRecording();
+            }
 
+            // Ignore accidental noise bursts, clicks, fan noise (< 350ms or < 1200 bytes)
+            if (!recResult || !recResult.blob || recResult.blob.size < 1200 || (recResult.durationMs && recResult.durationMs < 350)) {
+              console.log('[VAD] Ignored short noise / transient burst (< 350ms or < 1200B):', recResult?.durationMs, 'ms,', recResult?.blob?.size, 'bytes');
+              setIsProcessing(false);
+              setIsLoading(false);
+              setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
+              return;
+            }
+
+            console.log('[STT] mime=', recResult.mimeType);
+            console.log('[STT] bytes=', recResult.blob.size);
+            console.log('[STT] stt_started', { bytes: recResult.blob.size, durationMs: recResult.durationMs });
+            setIsProcessing(true);
+            setAgentState(AgentState.TRANSCRIBING);
+
+            // If WebSocket is connected, stream via full-duplex WebSocket for instant real-time response
+            if (defaultWebSocketClient.ws && defaultWebSocketClient.ws.readyState === WebSocket.OPEN) {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                try {
+                  const b64 = reader.result.split(',')[1];
+                  defaultWebSocketClient.sendSpeechEnded({
+                    audio_bytes_b64: b64,
+                    mime_type: recResult.mimeType,
+                    speaker: 'celeste',
+                    model_id: 'coda',
+                  });
+                } catch (readErr) {
+                  console.error('Failed to encode audio for WebSocket:', readErr);
+                  setIsProcessing(false);
+                  setIsLoading(false);
+                  setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
+                  setErrorMessage('Audio encoding failed. Please try again.');
+                }
+              };
+              reader.readAsDataURL(recResult.blob);
+            } else {
+              // Fallback to HTTP endpoint
               setAgentState(AgentState.THINKING);
               const { blob, headers } = await defaultApiClient.processAgentAudio({
                 audioBlob: recResult.blob,
@@ -292,57 +361,64 @@ export default function App() {
               defaultPlaybackManager.setActiveTurn(turnId);
               updateSessionTitleIfFirst(sessionId, headers.userTranscript);
 
-              const validatedResponse = sanitizeFinalResponse(headers.finalResponse || headers.assistantResponse);
-              setConversationTurns((prev) => [
-                ...prev,
-                {
-                  turnId,
-                  userPrompt: headers.userTranscript,
-                  assistantResponse: validatedResponse,
-                  speaker: headers.speaker || 'celeste',
-                  modelId: headers.modelId || 'coda',
-                  latencyMs: headers.latencyMs,
-                  searchUsed: headers.searchUsed,
-                  searchSources: headers.searchSources,
-                  status: 'COMPLETED',
-                },
-              ]);
-              setTtsText('');
+                const validatedResponse = sanitizeFinalResponse(headers.finalResponse || headers.assistantResponse);
+                const t_audio_start = Date.now();
+                const measuredE2eMs = t_audio_start - t_speech_end;
+                setMetricAE2eLatencyMs(measuredE2eMs);
+                setLastTurnLatency({
+                  totalMs: measuredE2eMs,
+                  sttMs: headers.sttLatencyMs || 0,
+                  llmMs: headers.llmLatencyMs || 0,
+                  ttsMs: headers.ttsLatencyMs || 0,
+                  playbackMs: Math.max(0, measuredE2eMs - (headers.latencyMs || 0)),
+                });
 
-              setEvents((prev) => [
-                {
-                  event_type: 'VAD_ORCHESTRATION_SUCCESS',
-                  timestamp_ms: Date.now(),
-                  session_id: headers.sessionId,
-                  turn_id: turnId,
-                  state: playbackState,
-                  details: {
-                    transcript: headers.userTranscript,
-                    response: headers.assistantResponse,
-                    speaker: headers.speaker,
-                    latency_ms: headers.latencyMs,
+                setConversationTurns((prev) => [
+                  ...prev,
+                  {
+                    turnId,
+                    userPrompt: headers.userTranscript,
+                    assistantResponse: validatedResponse,
+                    speaker: headers.speaker || 'celeste',
+                    modelId: headers.modelId || 'coda',
+                    latencyMs: measuredE2eMs,
+                    searchUsed: headers.searchUsed,
+                    searchSources: headers.searchSources,
+                    status: 'COMPLETED',
                   },
-                },
-                ...prev.slice(0, 59),
-              ]);
+                ]);
+                setTtsText('');
 
-              const t_audio_start = Date.now();
-              const measuredE2eMs = t_audio_start - t_speech_end;
-              setMetricAE2eLatencyMs(measuredE2eMs);
+                setEvents((prev) => [
+                  {
+                    event_type: 'VAD_ORCHESTRATION_SUCCESS',
+                    timestamp_ms: Date.now(),
+                    session_id: headers.sessionId,
+                    turn_id: turnId,
+                    state: playbackState,
+                    details: {
+                      transcript: headers.userTranscript,
+                      response: headers.assistantResponse,
+                      speaker: headers.speaker,
+                      latency_ms: headers.latencyMs,
+                    },
+                  },
+                  ...prev.slice(0, 59),
+                ]);
 
-              setAgentState(AgentState.PLAYING);
-              await defaultPlaybackManager.playAudio({
-                sessionId: headers.sessionId,
-                turnId: turnId,
-                audioSource: blob,
-                metadata: {
-                  speaker: headers.speaker || 'celeste',
-                  modelId: headers.modelId || 'coda',
-                  format: headers.audioFormat || 'mp3',
-                  bytes: headers.audioBytesLength,
-                },
-              });
-            }
+                setAgentState(AgentState.PLAYING);
+                await defaultPlaybackManager.playAudio({
+                  sessionId: headers.sessionId,
+                  turnId: turnId,
+                  audioSource: blob,
+                  metadata: {
+                    speaker: headers.speaker || 'celeste',
+                    modelId: headers.modelId || 'coda',
+                    format: headers.audioFormat || 'mp3',
+                    bytes: headers.audioBytesLength,
+                  },
+                });
+              }
           } catch (err) {
             if (err.status === 409 || err.message?.includes('cancelled') || err.message?.includes('superseded')) {
               console.log('VAD turn processing interrupted cleanly:', err.message);
@@ -350,18 +426,21 @@ export default function App() {
               setErrorMessage('');
             } else {
               console.error('VAD Voice Agent processing error:', err);
-              setAgentState(AgentState.ERROR);
-              setErrorMessage(`VAD Processing Error: ${err.message}`);
+              setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
+              setErrorMessage(`Voice Error: ${err.message}`);
             }
           } finally {
             setIsProcessing(false);
+            setIsLoading(false);
           }
         }
       } else if (evt.eventType === VADEventType.INTERRUPTION_DETECTED) {
         const t_detection = Date.now();
 
+        // 1. Immediately halt audio and invalidate turn synchronously at VAD/audio level first!
         defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
         defaultPlaybackManager.setActiveTurn(evt.newTurnId);
+        setActiveTurnId(evt.newTurnId);
 
         const t_stop = Date.now();
         const stopLatencyMs = t_stop - t_detection;
@@ -383,7 +462,13 @@ export default function App() {
           )
         );
 
-        setAgentState(AgentState.INTERRUPTING);
+        // Immediately transition agent to LISTENING so new speech has instant priority
+        setAgentState(AgentState.LISTENING);
+
+        // Ensure recorder is actively capturing the new utterance
+        if (typeof defaultRecorder.beginUtterance === 'function' && !defaultRecorder._isCapturingUtterance) {
+          defaultRecorder.beginUtterance();
+        }
 
         setEvents((prev) => [
           {
@@ -417,6 +502,7 @@ export default function App() {
           ...prev.slice(0, 59),
         ]);
 
+        // 2. Notify backend WebSocket immediately (cancels server task and prevents any more audio chunks)
         defaultWebSocketClient.sendInterruption({
           previousTurnId: evt.previousTurnId,
           newTurnId: evt.newTurnId,
@@ -425,47 +511,17 @@ export default function App() {
           assistantState: evt.assistantState,
         });
 
-        try {
-          const intRes = await defaultApiClient.interruptSession({
-            sessionId: evt.sessionId,
-            turnId: evt.previousTurnId,
-            reason: 'barge_in',
-            detectionSource: evt.detectionSource,
-            advanceTurn: true,
-            assistantState: evt.assistantState,
-          });
-
-          setActiveTurnId(intRes.new_turn_id);
-          defaultPlaybackManager.setActiveTurn(intRes.new_turn_id);
-
-          setEvents((prev) => [
-            {
-              event_type: 'INTERRUPTION_TURN_TRANSITIONED',
-              timestamp_ms: intRes.timestamp_ms,
-              session_id: intRes.session_id,
-              turn_id: intRes.new_turn_id,
-              state: playbackState,
-              details: {
-                previous_turn_id: intRes.previous_turn_id,
-                new_turn_id: intRes.new_turn_id,
-                status: intRes.status,
-              },
-            },
-            ...prev.slice(0, 59),
-          ]);
-
-          setAgentState(AgentState.LISTENING);
-          if (defaultRecorder.state !== RecorderState.RECORDING) {
-            try {
-              await defaultRecorder.startRecording();
-            } catch (e) {
-              console.error('Failed to start recorder on interruption:', e);
-            }
-          }
-        } catch (err) {
-          console.error('Failed to notify backend of interruption:', err);
-          setAgentState(AgentState.IDLE);
-        }
+        // 3. Notify backend HTTP in the background without blocking the UI or audio capture
+        defaultApiClient.interruptSession({
+          sessionId: evt.sessionId,
+          turnId: evt.previousTurnId,
+          reason: 'barge_in',
+          detectionSource: evt.detectionSource,
+          advanceTurn: true,
+          assistantState: evt.assistantState,
+        }).catch((err) => {
+          console.warn('Background HTTP interrupt note:', err);
+        });
       }
     });
 
@@ -492,6 +548,7 @@ export default function App() {
       } else if (evt.event_type === ServerEventType.TRANSCRIPT) {
         if (evt.data?.transcript) {
           setTtsText(evt.data.transcript);
+          console.log('[STT] stt_completed', { transcript: evt.data.transcript, latencyMs: evt.data.stt_latency_ms });
         }
         if (!evt.data?.is_final) {
           setAgentState(AgentState.TRANSCRIBING);
@@ -501,8 +558,28 @@ export default function App() {
       } else if (evt.event_type === ServerEventType.AUDIO_STARTED) {
         setAgentState(AgentState.PLAYING);
       } else if (evt.event_type === ServerEventType.AUDIO_DATA) {
-        if (evt.data?.audio_chunk && evt.turn_id) {
-          defaultPlaybackManager.queueAudioChunk(evt.turn_id, evt.data.audio_chunk);
+        if (evt.turn_id && (evt.data?.audio_chunk || evt.data?.audio_b64)) {
+          const rawAudio = evt.data.audio_chunk || evt.data.audio_b64;
+          defaultPlaybackManager.queueAudioChunk(
+            evt.turn_id,
+            rawAudio,
+            evt.data,
+            (playedItem) => {
+              if (playedItem.chunkIndex === 0 && speechEndTimeRef.current) {
+                const t_first_audio = Date.now();
+                const measuredTotalMs = Math.max(1, t_first_audio - speechEndTimeRef.current);
+                const breakdown = {
+                  totalMs: measuredTotalMs,
+                  sttMs: evt.data.stt_latency_ms || 0,
+                  llmMs: evt.data.llm_ttft_ms || 0,
+                  ttsMs: evt.data.tts_chunk_ms || 0,
+                  playbackMs: Math.max(0, measuredTotalMs - (evt.data.stt_latency_ms || 0) - (evt.data.llm_ttft_ms || 0) - (evt.data.tts_chunk_ms || 0)),
+                };
+                setLastTurnLatency(breakdown);
+                setMetricAE2eLatencyMs(measuredTotalMs);
+              }
+            }
+          );
         }
       } else if (evt.event_type === ServerEventType.AUDIO_STOP) {
         defaultPlaybackManager.stopCurrentAudio('server_audio_stop');
@@ -514,25 +591,42 @@ export default function App() {
         }
         setAgentState(AgentState.RECOVERING);
       } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
+        setIsProcessing(false);
         const candidateResponse = evt.data?.response || evt.data?.final_response || evt.data?.assistant_response;
         if (candidateResponse) {
           const validatedResponse = sanitizeFinalResponse(candidateResponse);
           setPreviousTurnId(evt.turn_id);
           setPreviousTurnStatus('COMPLETED');
+          const turnLatency = lastTurnLatency?.totalMs || evt.data?.latency_ms || metricAE2eLatencyMs;
+          const currentBreakdown = lastTurnLatency
+            ? { ...lastTurnLatency }
+            : turnLatency
+            ? { totalMs: turnLatency, sttMs: evt.data?.stt_latency_ms, llmMs: evt.data?.llm_latency_ms, ttsMs: evt.data?.tts_latency_ms }
+            : null;
           setConversationTurns((prev) => [
             ...prev,
             {
               turnId: evt.turn_id,
               userPrompt: evt.data?.user_prompt || ttsText,
               assistantResponse: validatedResponse,
-              latencyMs: evt.data?.latency_ms,
+              latencyMs: turnLatency,
+              latencyBreakdown: currentBreakdown,
               speaker: evt.data?.speaker || 'celeste',
               status: 'COMPLETED',
             },
           ]);
         }
       } else if (evt.event_type === ServerEventType.ERROR) {
+        setIsProcessing(false);
+        setIsLoading(false);
+        setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
         setErrorMessage(`Server Error: ${evt.data?.error || 'Unknown server error'}`);
+        console.error('[WS] Server Error:', evt.data?.error);
+      } else if (evt.event_type === ServerEventType.TURN_CANCELLED) {
+        setIsProcessing(false);
+        setIsLoading(false);
+        setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
+        console.log('[WS] Turn cancelled cleanly:', evt.data);
       }
     });
 
@@ -679,6 +773,13 @@ export default function App() {
         updateSessionTitleIfFirst(sessionId, headers.userTranscript);
 
         const validatedResponse = sanitizeFinalResponse(headers.finalResponse);
+        const recordBreakdown = {
+          totalMs: headers.latencyMs,
+          sttMs: headers.sttLatencyMs || 0,
+          llmMs: headers.llmLatencyMs || 0,
+          ttsMs: headers.ttsLatencyMs || 0,
+          playbackMs: Math.max(0, (headers.latencyMs || 0) - (headers.sttLatencyMs || 0) - (headers.llmLatencyMs || 0) - (headers.ttsLatencyMs || 0)),
+        };
         setConversationTurns((prev) => [
           ...prev,
           {
@@ -688,6 +789,7 @@ export default function App() {
             speaker: headers.speaker || 'celeste',
             modelId: headers.modelId || 'coda',
             latencyMs: headers.latencyMs,
+            latencyBreakdown: recordBreakdown,
             searchUsed: headers.searchUsed,
             searchSources: headers.searchSources,
             status: 'COMPLETED',
@@ -772,6 +874,19 @@ export default function App() {
     setIsProcessing(true);
     setAgentState(AgentState.THINKING);
 
+    const t_submit = Date.now();
+    speechEndTimeRef.current = t_submit;
+
+    if (defaultWebSocketClient.ws && defaultWebSocketClient.ws.readyState === WebSocket.OPEN) {
+      updateSessionTitleIfFirst(sessionId, promptToSend);
+      defaultWebSocketClient.sendTextPrompt(promptToSend, {
+        speaker: 'celeste',
+        model_id: 'coda',
+      });
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const { blob, headers } = await defaultApiClient.processAgentText({
         text: promptToSend,
@@ -783,7 +898,25 @@ export default function App() {
       defaultPlaybackManager.setActiveTurn(turnId);
       updateSessionTitleIfFirst(sessionId, promptToSend);
 
+      const t_first_audio = Date.now();
+      const measuredTotalMs = t_first_audio - t_submit;
+      setMetricAE2eLatencyMs(measuredTotalMs);
+      setLastTurnLatency({
+        totalMs: measuredTotalMs,
+        sttMs: 0,
+        llmMs: headers.llmLatencyMs || 0,
+        ttsMs: headers.ttsLatencyMs || 0,
+        playbackMs: Math.max(0, measuredTotalMs - (headers.latencyMs || 0)),
+      });
+
       const validatedResponse = sanitizeFinalResponse(headers.finalResponse || headers.assistantResponse);
+      const textBreakdown = {
+        totalMs: measuredTotalMs,
+        sttMs: 0,
+        llmMs: headers.llmLatencyMs || 0,
+        ttsMs: headers.ttsLatencyMs || 0,
+        playbackMs: Math.max(0, measuredTotalMs - (headers.latencyMs || 0)),
+      };
       setConversationTurns((prev) => [
         ...prev,
         {
@@ -793,6 +926,7 @@ export default function App() {
           speaker: headers.speaker || 'celeste',
           modelId: headers.modelId || 'coda',
           latencyMs: headers.latencyMs,
+          latencyBreakdown: textBreakdown,
           searchUsed: headers.searchUsed,
           searchSources: headers.searchSources,
           status: 'COMPLETED',
@@ -974,16 +1108,13 @@ export default function App() {
         setIsVADActive(true);
         setAgentState(AgentState.LISTENING);
 
-        // Auto-end if voice session is completely abandoned without any speech within 4.5s
-        abandonmentTimerRef.current = setTimeout(() => {
-          if (defaultRecorder.state !== RecorderState.RECORDING && !isProcessing) {
-            console.log('Abandoned voice session auto-ended due to inactivity.');
-            defaultVAD.stop();
-            setIsVADActive(false);
-            setIsRecording(false);
-            setAgentState(AgentState.IDLE);
-          }
-        }, 4500);
+        // Pre-warm the recorder with the active VAD mediaStream so speech onset is never clipped!
+        try {
+          await defaultRecorder.startRecording(selectedDeviceId || null, defaultVAD.getMediaStream());
+          defaultRecorder._isCapturingUtterance = false; // Start in pre-roll buffering mode
+        } catch (recErr) {
+          console.warn('Continuous recorder pre-warm note:', recErr);
+        }
       } catch (err) {
         console.error('Voice Assistant initialization error:', err);
         setAgentState(AgentState.ERROR);
@@ -1202,14 +1333,16 @@ export default function App() {
           setText={setTtsText}
           onSend={handleProcessText}
           onToggleVoice={handleToggleVoice}
+          onStopAudio={handleStopAudio}
           isRecording={isRecording}
           isProcessing={isProcessing}
           isLoading={isLoading}
           isVADActive={isVADActive}
           playbackState={playbackState}
           agentState={agentState}
+          micLevel={micLevel}
           onSelectQuickPrompt={handleSelectQuickPrompt}
-          metricAE2eLatencyMs={metricAE2eLatencyMs}
+          lastTurnLatency={lastTurnLatency}
         />
       </div>
     </div>

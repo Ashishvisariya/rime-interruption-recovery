@@ -60,26 +60,23 @@ export default function ChatThread({
                   </div>
                   <div className="msg-bubble assistant-bubble-content">
                     <div className="msg-header">
-                      <span className="msg-author">Voice Assistant</span>
-                      <span className="msg-rime-tag">Rime &bull; {turn.speaker || 'celeste'}</span>
+                      <span className="msg-author">Voice Assistant · Rime</span>
                       {turn.searchUsed && (
                         <span className="turn-status-tag tag-authoritative" title="Real-time web search results from Tavily were incorporated">
                           🔍 Web Search
                         </span>
                       )}
-                      {isInterrupted ? (
+                      {isInterrupted && (
                         <span className="turn-status-tag tag-interrupted">
-                          <IconZap size={12} style={{ marginRight: 4 }} /> INTERRUPTED
+                          <IconZap size={11} style={{ marginRight: 3 }} /> INTERRUPTED
                         </span>
-                      ) : (
-                        <span className="turn-status-tag tag-completed">COMPLETED</span>
                       )}
                     </div>
                     <div className="msg-text">
                       {turn.assistantResponse || (isInterrupted ? '[Speech Halted Promptly on Barge-In]' : '')}
                     </div>
                     {turn.searchSources && turn.searchSources.length > 0 && (
-                      <div className="msg-sources" style={{ marginTop: '6px', fontSize: '11px', color: '#94a3b8' }}>
+                      <div className="msg-sources" style={{ marginTop: '4px', fontSize: '11px', color: '#94a3b8' }}>
                         <span>Sources: </span>
                         {turn.searchSources.slice(0, 3).map((src, sIdx) => {
                           let hostname = src;
@@ -98,6 +95,26 @@ export default function ChatThread({
                         })}
                       </div>
                     )}
+
+                    {/* One small inline row for latency */}
+                    {turn.latencyBreakdown && turn.latencyBreakdown.totalMs ? (
+                      <div className="msg-latency-row">
+                        <span className="latency-total">⚡ {(turn.latencyBreakdown.totalMs / 1000).toFixed(2)}s</span>
+                        {turn.latencyBreakdown.sttMs !== undefined && (
+                          <span className="latency-part"> · STT {(turn.latencyBreakdown.sttMs / 1000).toFixed(2)}s</span>
+                        )}
+                        {turn.latencyBreakdown.llmMs !== undefined && (
+                          <span className="latency-part"> · LLM {(turn.latencyBreakdown.llmMs / 1000).toFixed(2)}s</span>
+                        )}
+                        {turn.latencyBreakdown.ttsMs !== undefined && (
+                          <span className="latency-part"> · Rime {(turn.latencyBreakdown.ttsMs / 1000).toFixed(2)}s</span>
+                        )}
+                      </div>
+                    ) : turn.latencyMs ? (
+                      <div className="msg-latency-row">
+                        <span className="latency-total">⚡ {(turn.latencyMs / 1000).toFixed(2)}s</span>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>

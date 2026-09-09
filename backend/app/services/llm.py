@@ -5,9 +5,10 @@ Designed specifically for spoken dialogue: concise, speech-friendly phrasing,
 no markdown clutter, safe error handling, and strict decoupling from session/interruption logic.
 """
 
+import json
 import time
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
 
 from backend.app.config import Settings, get_settings
@@ -397,6 +398,230 @@ class GroqLLMService:
             "latency_ms": round(latency_ms, 2),
             "status": "SUCCESS",
         }
+
+    async def generate_stream(
+        self,
+        messages: List[Any],
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.5,
+        max_tokens: int = 250,
+        api_key_override: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream conversational response in natural sentence/phrase chunks for ultra-low latency TTS.
+        
+        Yields dictionaries with:
+            chunk_text: Text of this chunk to synthesize immediately with Rime.
+            chunk_index: Monotonic chunk index (0, 1, 2...).
+            is_final: True if this is the final chunk of the response.
+            ttft_ms: Time to first token from Groq LLM in ms.
+            chunk_latency_ms: Latency to this chunk from start in ms.
+            accumulated_text: Cleaned full response so far.
+        """
+        api_key = api_key_override or self.settings.groq_api_key
+        if not api_key or not api_key.strip():
+            raise GroqLLMServiceError(
+                "Groq API key is not configured. Set GROQ_API_KEY in environment or backend/.env."
+            )
+
+        if not messages:
+            raise GroqLLMServiceError("Cannot generate response: message list is empty.")
+
+        target_model = model or self.settings.groq_model
+        sys_prompt = VOICE_SYSTEM_PROMPT
+        if system_prompt and system_prompt.strip():
+            sys_prompt = f"{VOICE_SYSTEM_PROMPT}\n\n{system_prompt.strip()}"
+
+        payload_messages: List[Dict[str, str]] = []
+        if sys_prompt and sys_prompt.strip():
+            payload_messages.append({"role": "system", "content": sys_prompt.strip()})
+
+        for msg in messages:
+            role = msg["role"] if isinstance(msg, dict) else getattr(msg, "role", "user")
+            content = msg["content"] if isinstance(msg, dict) else getattr(msg, "content", "")
+            if not content or not content.strip():
+                continue
+            if role == "system":
+                if payload_messages and payload_messages[0]["role"] == "system":
+                    payload_messages[0]["content"] += f"\n\n{content.strip()}"
+                else:
+                    payload_messages.append({"role": "system", "content": content.strip()})
+                continue
+            payload_messages.append({"role": role, "content": content.strip()})
+
+        if not payload_messages or (len(payload_messages) == 1 and payload_messages[0]["role"] == "system"):
+            raise GroqLLMServiceError("Cannot generate response: no valid user/assistant message content provided.")
+
+        headers = {
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        }
+
+        body = {
+            "model": target_model,
+            "messages": payload_messages,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+            "stream": True,
+            "reasoning_effort": "none",
+        }
+
+        start_time = time.perf_counter()
+        ttft_ms: Optional[float] = None
+        buffer = ""
+        accumulated_clean_text = ""
+        chunk_index = 0
+        inside_think = False
+        chunks_yielded = 0
+
+        def find_split_point(text: str, is_first: bool) -> Optional[int]:
+            sentence_match = re.search(r'([.?!])(?:\s+|$)', text)
+            if sentence_match:
+                end_idx = sentence_match.end()
+                prefix = text[:end_idx].strip()
+                if not re.search(r'\b(mr|mrs|ms|dr|prof|sr|jr|vs|eg|ie|etc)\.\s*$', prefix, re.IGNORECASE):
+                    if not re.search(r'\d+\.\s*$', prefix):
+                        return end_idx
+            words = text.split()
+            if is_first and len(words) >= 6:
+                clause_match = re.search(r'([,;:\-—])\s+', text)
+                if clause_match:
+                    return clause_match.end()
+            elif len(words) >= 12:
+                clause_match = re.search(r'([,;:\-—])\s+', text)
+                if clause_match and clause_match.end() >= len(text) * 0.35:
+                    return clause_match.end()
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                req = client.build_request("POST", self.settings.groq_llm_url, headers=headers, json=body)
+                response = await client.send(req, stream=True)
+
+                if response.status_code == 400:
+                    body.pop("reasoning_effort", None)
+                    await response.aclose()
+                    req = client.build_request("POST", self.settings.groq_llm_url, headers=headers, json=body)
+                    response = await client.send(req, stream=True)
+
+                if response.status_code != 200:
+                    await response.aread()
+                    fallback_res = await self.generate(messages, system_prompt=system_prompt, model=model, temperature=temperature, max_tokens=max_tokens)
+                    yield {
+                        "chunk_text": fallback_res["final_response"],
+                        "chunk_index": 0,
+                        "is_final": True,
+                        "ttft_ms": fallback_res["latency_ms"],
+                        "chunk_latency_ms": fallback_res["latency_ms"],
+                        "accumulated_text": fallback_res["final_response"],
+                    }
+                    return
+
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk_json = json.loads(data_str)
+                            choices = chunk_json.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            delta_content = delta.get("content") or ""
+
+                            if "<think>" in delta_content:
+                                inside_think = True
+                            if "</think>" in delta_content:
+                                inside_think = False
+                                delta_content = delta_content.split("</think>")[-1]
+
+                            if inside_think:
+                                continue
+
+                            delta_content = re.sub(r'[*_#`]', '', delta_content)
+                            if not delta_content:
+                                continue
+
+                            if ttft_ms is None:
+                                ttft_ms = (time.perf_counter() - start_time) * 1000.0
+
+                            buffer += delta_content
+
+                            split_pos = find_split_point(buffer, is_first=(chunks_yielded == 0))
+                            if split_pos is not None:
+                                chunk_str = buffer[:split_pos].strip()
+                                buffer = buffer[split_pos:].lstrip()
+                                if chunk_str:
+                                    clean_chunk = clean_final_user_response(chunk_str)
+                                    if clean_chunk:
+                                        now_ms = (time.perf_counter() - start_time) * 1000.0
+                                        accumulated_clean_text = (accumulated_clean_text + " " + clean_chunk).strip()
+                                        chunks_yielded += 1
+                                        yield {
+                                            "chunk_text": clean_chunk,
+                                            "chunk_index": chunk_index,
+                                            "is_final": False,
+                                            "ttft_ms": round(ttft_ms or now_ms, 2),
+                                            "chunk_latency_ms": round(now_ms, 2),
+                                            "accumulated_text": accumulated_clean_text,
+                                        }
+                                        chunk_index += 1
+                        except Exception:
+                            continue
+
+                await response.aclose()
+
+        except Exception:
+            fallback = await self.generate(messages, system_prompt=system_prompt, model=model, temperature=temperature, max_tokens=max_tokens)
+            yield {
+                "chunk_text": fallback["final_response"],
+                "chunk_index": 0,
+                "is_final": True,
+                "ttft_ms": fallback["latency_ms"],
+                "chunk_latency_ms": fallback["latency_ms"],
+                "accumulated_text": fallback["final_response"],
+            }
+            return
+
+        remaining = buffer.strip()
+        now_ms = (time.perf_counter() - start_time) * 1000.0
+        if remaining:
+            clean_remaining = clean_final_user_response(remaining)
+            if clean_remaining:
+                accumulated_clean_text = (accumulated_clean_text + " " + clean_remaining).strip()
+                chunks_yielded += 1
+                yield {
+                    "chunk_text": clean_remaining,
+                    "chunk_index": chunk_index,
+                    "is_final": True,
+                    "ttft_ms": round(ttft_ms or now_ms, 2),
+                    "chunk_latency_ms": round(now_ms, 2),
+                    "accumulated_text": accumulated_clean_text,
+                }
+                return
+
+        if chunks_yielded == 0:
+            yield {
+                "chunk_text": SAFE_FALLBACK_RESPONSE,
+                "chunk_index": 0,
+                "is_final": True,
+                "ttft_ms": round(ttft_ms or now_ms, 2),
+                "chunk_latency_ms": round(now_ms, 2),
+                "accumulated_text": SAFE_FALLBACK_RESPONSE,
+            }
+        else:
+            yield {
+                "chunk_text": "",
+                "chunk_index": chunk_index,
+                "is_final": True,
+                "ttft_ms": round(ttft_ms or now_ms, 2),
+                "chunk_latency_ms": round(now_ms, 2),
+                "accumulated_text": accumulated_clean_text,
+            }
 
 
 # Default singleton instance

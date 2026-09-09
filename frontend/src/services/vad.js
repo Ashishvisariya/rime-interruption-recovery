@@ -27,14 +27,23 @@ export const VADEventType = {
 
 export const DEFAULT_VAD_CONFIG = {
   // RMS energy threshold for speech onset (0.0 to 1.0)
-  // 0.01 is ~ -40 dBFS, responsive for clear voice detection across desktop/laptop mics
-  energyThreshold: 0.01,
+  // 0.022 ignores room floor, fan hum, and distant background noise
+  energyThreshold: 0.022,
+
+  // Higher RMS energy threshold while assistant is playing audio
+  // to prevent speaker bleed/echo from triggering the microphone
+  playbackEnergyThreshold: 0.032,
 
   // Minimum duration of continuous speech above threshold before triggering speech onset (ms)
-  minSpeechDurationMs: 100,
+  // 350ms ignores short clicks, keyboard clatter, throat clearing, and noise bursts
+  minSpeechDurationMs: 350,
+
+  // Snappy continuous speech duration for barge-in while AI is speaking (ms)
+  bargeInSpeechDurationMs: 180,
 
   // Duration of continuous silence below threshold before declaring speech ended (ms)
-  silenceDurationMs: 550,
+  // 800ms provides natural pause tolerance without premature auto-submitting
+  silenceDurationMs: 800,
 
   // Minimum interval between successive interruption events to prevent event spam (ms)
   debounceMs: 400,
@@ -49,11 +58,19 @@ export class VoiceActivityDetector {
    * @param {Object} [options.config] - Custom VAD configuration overrides
    * @param {Function} [options.getAssistantState] - Callback returning current assistant state ('PLAYING', 'THINKING', 'SYNTHESIZING', 'IDLE')
    * @param {Function} [options.getSessionContext] - Callback returning { sessionId, activeTurnId }
+   * @param {Function} [options.isAudioPlaying] - Callback returning boolean whether audio is actively playing or queued
+   * @param {Function} [options.onBargeIn] - Immediate synchronous callback when barge-in is triggered
+   * @param {Function} [options.onSpeechOnset] - Callback fired at first speech onset frame
+   * @param {Function} [options.onSpeechCancel] - Callback fired if speech onset was not sustained
    */
   constructor(options = {}) {
     this.config = { ...DEFAULT_VAD_CONFIG, ...(options.config || {}) };
     this.getAssistantState = options.getAssistantState || (() => 'IDLE');
     this.getSessionContext = options.getSessionContext || (() => ({ sessionId: 'default', activeTurnId: 0 }));
+    this.isAudioPlaying = options.isAudioPlaying || (() => false);
+    this.onBargeIn = options.onBargeIn || null;
+    this.onSpeechOnset = options.onSpeechOnset || null;
+    this.onSpeechCancel = options.onSpeechCancel || null;
 
     this.state = VADState.INACTIVE;
     this.isSpeaking = false;
@@ -108,7 +125,17 @@ export class VoiceActivityDetector {
       timestamp: currentTimeMs,
     });
 
-    const isAboveThreshold = energy >= this.config.energyThreshold;
+    const isAudioPlaying = typeof this.isAudioPlaying === 'function' ? this.isAudioPlaying() : false;
+    const assistantState = this.getAssistantState();
+    const sessionCtx = this.getSessionContext();
+    const isAssistantActive = isAudioPlaying || ['PLAYING', 'THINKING', 'SYNTHESIZING'].includes(assistantState);
+
+    // Audio-aware threshold: if AI is speaking, use playback threshold to prevent self-trigger from speaker echo
+    const effectiveThreshold = isAudioPlaying
+      ? (this.config.playbackEnergyThreshold || 0.032)
+      : this.config.energyThreshold;
+
+    const isAboveThreshold = energy >= effectiveThreshold;
     let interruptionTriggered = false;
 
     if (isAboveThreshold) {
@@ -118,25 +145,42 @@ export class VoiceActivityDetector {
       if (!this.isSpeaking) {
         if (this.speechStartTime === null) {
           this.speechStartTime = currentTimeMs;
+          if (typeof this.onSpeechOnset === 'function') {
+            try { this.onSpeechOnset(); } catch (e) {}
+          }
         } else {
           const speechDuration = currentTimeMs - this.speechStartTime;
-          if (speechDuration >= this.config.minSpeechDurationMs) {
+          const requiredDuration = isAssistantActive
+            ? Math.min(180, this.config.minSpeechDurationMs)
+            : this.config.minSpeechDurationMs;
+
+          if (speechDuration >= requiredDuration) {
             // Sustained speech confirmed!
             this.isSpeaking = true;
             this._transitionTo(VADState.SPEECH_DETECTED);
+            console.log('[VAD] speech_detected', { rms: energy.toFixed(4), timestamp: currentTimeMs, speechDuration, isAssistantActive });
 
-            const assistantState = this.getAssistantState();
-            const sessionCtx = this.getSessionContext();
-
-            const isAssistantActive = ['PLAYING', 'THINKING', 'SYNTHESIZING'].includes(assistantState);
             const isDebounced = this.lastInterruptionTime &&
               (currentTimeMs - this.lastInterruptionTime < this.config.debounceMs);
 
             if (isAssistantActive && !isDebounced) {
-              // Trigger barge-in interruption!
+              // Trigger barge-in interruption immediately!
               this.lastInterruptionTime = currentTimeMs;
               interruptionTriggered = true;
               this._transitionTo(VADState.INTERRUPTED);
+
+              // BARGE-IN AT VAD/AUDIO LEVEL FIRST: Stop playback synchronously before anything else
+              if (typeof this.onBargeIn === 'function') {
+                try {
+                  this.onBargeIn({
+                    sessionId: sessionCtx.sessionId,
+                    previousTurnId: sessionCtx.activeTurnId,
+                    newTurnId: (sessionCtx.activeTurnId || 0) + 1,
+                  });
+                } catch (e) {
+                  console.error('[VAD] onBargeIn callback error:', e);
+                }
+              }
 
               this._emitEvent(VADEventType.INTERRUPTION_DETECTED, {
                 sessionId: sessionCtx.sessionId,
@@ -144,11 +188,11 @@ export class VoiceActivityDetector {
                 newTurnId: (sessionCtx.activeTurnId || 0) + 1,
                 timestamp: currentTimeMs,
                 detectionSource: 'vad_speech_start',
-                assistantState: assistantState,
+                assistantState: isAudioPlaying ? 'PLAYING' : assistantState,
                 energy: energy,
                 speechDurationMs: speechDuration,
               });
-            } else {
+            } else if (!isAssistantActive) {
               // Normal speech start
               this._emitEvent(VADEventType.SPEECH_STARTED, {
                 sessionId: sessionCtx.sessionId,
@@ -164,6 +208,11 @@ export class VoiceActivityDetector {
       }
     } else {
       // Audio energy is below threshold
+      if (!this.isSpeaking && this.speechStartTime !== null) {
+        if (typeof this.onSpeechCancel === 'function') {
+          try { this.onSpeechCancel(); } catch (e) {}
+        }
+      }
       this.speechStartTime = null;
 
       if (this.isSpeaking) {
@@ -217,10 +266,9 @@ export class VoiceActivityDetector {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
         },
       });
 

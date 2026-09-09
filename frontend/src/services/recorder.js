@@ -85,14 +85,16 @@ export class MicrophoneRecorder {
         const audioConstraints = deviceId
           ? {
               deviceId: { exact: deviceId },
-              echoCancellation: true,
-              autoGainControl: true,
-              noiseSuppression: true,
+              channelCount: 1,
+              echoCancellation: { ideal: true },
+              autoGainControl: { ideal: true },
+              noiseSuppression: { ideal: true },
             }
           : {
-              echoCancellation: true,
-              autoGainControl: true,
-              noiseSuppression: true,
+              channelCount: 1,
+              echoCancellation: { ideal: true },
+              autoGainControl: { ideal: true },
+              noiseSuppression: { ideal: true },
             };
 
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -151,10 +153,14 @@ export class MicrophoneRecorder {
       }
 
       this.audioChunks = [];
+      this._isCapturingUtterance = true;
       this.mediaRecorder = new MediaRecorder(this.mediaStream, { mimeType });
+
+      console.log('[MIC] mic_started', { mimeType, deviceId, isShared: this._isSharedStream });
 
       this.mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
+          console.log('[MIC] audio_chunk_received', { size: event.data.size });
           this.audioChunks.push(event.data);
         }
       };
@@ -171,6 +177,94 @@ export class MicrophoneRecorder {
       }
       throw new Error(`Failed to access microphone: ${err.message}`);
     }
+  }
+
+  /**
+   * Transition warm continuous stream into active utterance capture with a clean MediaRecorder session.
+   * This guarantees chunk 0 contains the valid WebM EBML container header (0x1A45DFA3).
+   */
+  beginUtterance() {
+    this._isCapturingUtterance = true;
+    this.startTime = Date.now();
+    this.audioChunks = [];
+
+    // Cleanly stop any previous recorder session
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      try {
+        this.mediaRecorder.ondataavailable = null;
+        this.mediaRecorder.onstop = null;
+        this.mediaRecorder.stop();
+      } catch (e) {}
+    }
+
+    if (this.mediaStream && this.mediaStream.active) {
+      let mimeType = 'audio/webm;codecs=opus';
+      if (typeof MediaRecorder !== 'undefined' && !MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : 'audio/ogg';
+      }
+
+      this.mediaRecorder = new MediaRecorder(this.mediaStream, { mimeType });
+      this.mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          console.log('[MIC] audio_chunk_received', { size: event.data.size });
+          this.audioChunks.push(event.data);
+        }
+      };
+      this.mediaRecorder.start(100);
+      console.log('[MIC] speech_detected: fresh MediaRecorder started for utterance', { mimeType });
+    }
+    this._transitionTo(RecorderState.RECORDING);
+  }
+
+  /**
+   * Finalize current speech utterance into a non-empty audio Blob without tearing down the underlying stream.
+   * Ensures final audio chunk is flushed before closing.
+   * @returns {Promise<{ blob: Blob, mimeType: string, durationMs: number, maxEnergy: number }>}
+   */
+  async endUtterance() {
+    this._isCapturingUtterance = false;
+    if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+      const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+      const blob = new Blob(this.audioChunks, { type: mimeType });
+      const durationMs = this.startTime ? Date.now() - this.startTime : 0;
+      return { blob, mimeType, durationMs, maxEnergy: this.maxEnergy || 0 };
+    }
+
+    return new Promise((resolve) => {
+      this.mediaRecorder.onstop = () => {
+        const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+        const blob = new Blob(this.audioChunks, { type: mimeType });
+        const durationMs = this.startTime ? Date.now() - this.startTime : 0;
+        const maxEnergy = this.maxEnergy || 0;
+
+        console.log('[MIC] recording_stopped', { chunks: this.audioChunks.length, bytes: blob.size, durationMs });
+        console.log('[MIC] audio_bytes', { totalBytes: blob.size, durationMs });
+
+        this.audioChunks = [];
+        this._transitionTo(RecorderState.IDLE);
+        resolve({ blob, mimeType, durationMs, maxEnergy });
+      };
+
+      try {
+        if (this.mediaRecorder.state === 'recording') {
+          if (typeof this.mediaRecorder.requestData === 'function') {
+            this.mediaRecorder.requestData(); // Ensure the final audio chunk is received BEFORE uploading!
+          }
+          this.mediaRecorder.stop();
+        } else {
+          this.mediaRecorder.stop();
+        }
+      } catch (err) {
+        console.warn('endUtterance stop note:', err);
+        const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+        const blob = new Blob(this.audioChunks, { type: mimeType });
+        resolve({ blob, mimeType, durationMs: 0, maxEnergy: 0 });
+      }
+    });
   }
 
   /**
@@ -193,7 +287,8 @@ export class MicrophoneRecorder {
           const maxEnergy = this.maxEnergy || 0;
           const avgEnergy = this.energySamplesCount > 0 ? this.totalEnergy / this.energySamplesCount : 0;
 
-          console.log(`[Recorder] Stopped: chunks=${this.audioChunks.length}, size=${blob.size}B, duration=${durationMs}ms, maxEnergy=${maxEnergy.toFixed(4)}, avgEnergy=${avgEnergy.toFixed(4)}`);
+          console.log('[MIC] recording_stopped', { chunks: this.audioChunks.length, bytes: blob.size, durationMs });
+          console.log('[MIC] audio_bytes', { totalBytes: blob.size, durationMs });
 
           this._cleanupStream();
           this._transitionTo(RecorderState.IDLE);
@@ -216,11 +311,14 @@ export class MicrophoneRecorder {
       };
 
       try {
-        // Explicitly flush buffered timeslice audio before stopping
         if (this.mediaRecorder.state === 'recording') {
-          this.mediaRecorder.requestData();
+          if (typeof this.mediaRecorder.requestData === 'function') {
+            this.mediaRecorder.requestData(); // Ensure the final audio chunk is received BEFORE uploading!
+          }
+          this.mediaRecorder.stop();
+        } else {
+          this.mediaRecorder.stop();
         }
-        this.mediaRecorder.stop();
       } catch (err) {
         this._cleanupStream();
         this._transitionTo(RecorderState.ERROR);
