@@ -5,7 +5,26 @@
  * Zero credentials or API keys are required or exposed in the client.
  */
 
-const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+export const getApiBaseUrl = () => {
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) {
+    let url = import.meta.env.VITE_API_BASE_URL.trim();
+    if (!url.endsWith('/api')) {
+      url = url.replace(/\/+$/, '') + '/api';
+    }
+    return url;
+  }
+  if (typeof window !== 'undefined' && window.location.hostname && !['localhost', '127.0.0.1'].includes(window.location.hostname)) {
+    return 'https://rime-interruption-recovery-1-tiw6.onrender.com/api';
+  }
+  return 'http://127.0.0.1:8000/api';
+};
+
+export const getRootBaseUrl = (apiUrl = null) => {
+  const base = apiUrl || getApiBaseUrl();
+  return base.replace(/\/api\/?$/, '');
+};
+
+export const API_BASE_URL = getApiBaseUrl();
 
 const safeDecodeHeader = (val) => {
   if (!val) return '';
@@ -17,8 +36,8 @@ const safeDecodeHeader = (val) => {
 };
 
 export class VoiceApiClient {
-  constructor(baseUrl = API_BASE_URL) {
-    this.baseUrl = baseUrl;
+  constructor(baseUrl = null) {
+    this.baseUrl = baseUrl || getApiBaseUrl();
   }
 
   /**

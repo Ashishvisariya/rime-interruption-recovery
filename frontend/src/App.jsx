@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { defaultPlaybackManager, PlaybackState } from './services/audio.js';
-import { defaultApiClient } from './services/api.js';
+import { defaultApiClient, getRootBaseUrl } from './services/api.js';
 import { defaultRecorder, RecorderState } from './services/recorder.js';
 import { defaultVAD, VADEventType } from './services/vad.js';
 import { defaultWebSocketClient, WebSocketState, ServerEventType } from './services/websocket.js';
@@ -226,7 +226,8 @@ export default function App() {
   const connectSession = async (explicitSessionId = null, forceNewSession = false) => {
     try {
       setErrorMessage('');
-      const rootRes = await fetch('http://127.0.0.1:8000/').then((r) => r.json()).catch(() => null);
+      const rootUrl = getRootBaseUrl(defaultApiClient.baseUrl);
+      const rootRes = await fetch(`${rootUrl}/`).then((r) => r.json()).catch(() => null);
       setBackendStatus(rootRes);
 
       let targetSessionId = forceNewSession ? '' : (explicitSessionId || sessionId);
