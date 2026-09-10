@@ -1,5 +1,7 @@
 import React from 'react';
 import { IconPlus, IconChat, IconSettings, IconUser } from './Icons.jsx';
+import { getSessionPreview } from '../services/session_utils.js';
+import { formatRelativeTime } from '../services/conversation_storage.js';
 
 export default function Sidebar({
   sessions = [],
@@ -34,23 +36,40 @@ export default function Sidebar({
           {sessions.length === 0 ? (
             <div className="session-item active">
               <IconChat size={16} className="session-icon" />
-              <span className="session-title">Current Voice Chat</span>
+              <div className="session-info">
+                <div className="session-title-row">
+                  <span className="session-title">Current Voice Chat</span>
+                </div>
+                <span className="session-preview empty">No messages yet</span>
+              </div>
             </div>
           ) : (
-            sessions.map((sess, idx) => (
-              <button
-                key={sess.id || idx}
-                type="button"
-                className={`session-item ${sess.id === activeSessionId ? 'active' : ''}`}
-                onClick={() => onSelectSession(sess.id)}
-              >
-                <IconChat size={16} className="session-icon" />
-                <div className="session-info">
-                  <span className="session-title">{sess.title || `Chat ${sess.id.slice(0, 8)}...`}</span>
-                  <span className="session-date">{sess.date || 'Just now'}</span>
-                </div>
-              </button>
-            ))
+            sessions.map((sess, idx) => {
+              const preview = sess.preview || getSessionPreview(sess);
+              const relativeTime = formatRelativeTime(sess.updatedAt || sess.createdAt || sess.date);
+              return (
+                <button
+                  key={sess.id || idx}
+                  type="button"
+                  className={`session-item ${sess.id === activeSessionId ? 'active' : ''}`}
+                  onClick={() => onSelectSession(sess.id)}
+                  title={`${sess.title || 'Conversation'}${preview ? `\n\n${preview}` : ''}`}
+                >
+                  <IconChat size={16} className="session-icon" />
+                  <div className="session-info">
+                    <div className="session-title-row">
+                      <span className="session-title">{sess.title || `Chat ${sess.id.slice(0, 8)}...`}</span>
+                      <span className="session-date">{relativeTime}</span>
+                    </div>
+                    {preview ? (
+                      <span className="session-preview">{preview}</span>
+                    ) : (
+                      <span className="session-preview empty">No messages yet</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })
           )}
         </div>
       </div>

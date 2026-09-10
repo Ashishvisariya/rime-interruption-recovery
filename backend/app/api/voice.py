@@ -437,7 +437,7 @@ async def respond_with_llm(request: LLMRequest) -> LLMResponse:
             messages=request.messages,
             system_prompt=request.system_prompt,
             temperature=request.temperature or 0.7,
-            max_tokens=request.max_tokens or 256,
+            max_tokens=request.max_tokens or 200,
         )
     except ValueError as e:
         raise HTTPException(

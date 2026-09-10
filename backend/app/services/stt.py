@@ -32,8 +32,10 @@ class GroqSTTService:
         client: Optional[httpx.AsyncClient] = None,
     ):
         self._settings = settings or get_settings()
-        self._client = client
         self._timeout = httpx.Timeout(timeout=15.0, connect=5.0)
+        # Use a persistent client for connection reuse (avoids ~1.5s TLS handshake per call)
+        self._client = client or httpx.AsyncClient(timeout=self._timeout)
+        self._owns_client = client is None
 
     async def transcribe(
         self,
@@ -117,15 +119,9 @@ class GroqSTTService:
         if language:
             data["language"] = language
 
-        created_client = False
-        client = self._client
-        if client is None:
-            client = httpx.AsyncClient(timeout=self._timeout)
-            created_client = True
-
         t_start = time.perf_counter()
         try:
-            response = await client.post(
+            response = await self._client.post(
                 api_url,
                 headers=headers,
                 files=files,
@@ -168,9 +164,6 @@ class GroqSTTService:
             raise STTError(f"Groq STT request timed out: {type(exc).__name__}") from None
         except httpx.RequestError as exc:
             raise STTError(f"Groq STT network connection error: {type(exc).__name__}") from None
-        finally:
-            if created_client:
-                await client.aclose()
 
 
 # Default service instance

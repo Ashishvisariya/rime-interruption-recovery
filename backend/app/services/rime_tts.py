@@ -29,8 +29,10 @@ class RimeTTSService:
         client: Optional[httpx.AsyncClient] = None,
     ):
         self._settings = settings or get_settings()
-        self._client = client
         self._timeout = httpx.Timeout(timeout=10.0, connect=5.0)
+        # Use a persistent client for connection reuse (avoids ~1.5s TLS handshake per call)
+        self._client = client or httpx.AsyncClient(timeout=self._timeout)
+        self._owns_client = client is None
 
     def _resolve_accept_header(self, audio_format: str) -> str:
         """Map audio format string to HTTP Accept MIME type."""
@@ -102,14 +104,8 @@ class RimeTTSService:
         if lang:
             payload["lang"] = lang
 
-        created_client = False
-        client = self._client
-        if client is None:
-            client = httpx.AsyncClient(timeout=self._timeout)
-            created_client = True
-
         try:
-            response = await client.post(
+            response = await self._client.post(
                 api_url,
                 headers=headers,
                 json=payload,
@@ -150,9 +146,6 @@ class RimeTTSService:
             raise RimeTTSError(f"Rime TTS request timed out: {type(exc).__name__}") from None
         except httpx.RequestError as exc:
             raise RimeTTSError(f"Rime TTS network connection error: {type(exc).__name__}") from None
-        finally:
-            if created_client:
-                await client.aclose()
 
 
 # Default service instance

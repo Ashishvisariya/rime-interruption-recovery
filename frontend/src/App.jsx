@@ -30,36 +30,40 @@ export const AgentState = {
 };
 
 import { sanitizeFinalResponse } from './services/response_sanitizer.js';
+import { getLatestMessagePreview } from './services/session_utils.js';
+import {
+  loadAllConversations,
+  getStoredConversation,
+  createNewConversationRecord,
+  persistConversationTurns,
+  ACTIVE_SESSION_KEY,
+  generateTitleFromPrompt,
+} from './services/conversation_storage.js';
 
 export default function App() {
   const [sessions, setSessions] = useState(() => {
-    try {
-      const saved = localStorage.getItem('rime_voice_sessions');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
+    return loadAllConversations();
   });
 
   const [sessionId, setSessionId] = useState(() => {
     try {
-      return localStorage.getItem('rime_voice_active_session') || '';
-    } catch (e) {
-      return '';
-    }
+      const active = localStorage.getItem(ACTIVE_SESSION_KEY);
+      if (active) return active;
+      const all = loadAllConversations();
+      if (all.length > 0 && all[0]?.id) return all[0].id;
+    } catch (e) {}
+    return '';
   });
 
   const [conversationTurns, setConversationTurns] = useState(() => {
     try {
-      const activeId = localStorage.getItem('rime_voice_active_session');
-      const saved = localStorage.getItem('rime_voice_chats');
-      if (activeId && saved) {
-        const chatsMap = JSON.parse(saved);
-        return chatsMap[activeId] || [];
+      const active = localStorage.getItem(ACTIVE_SESSION_KEY);
+      const all = loadAllConversations();
+      const target = (active && all.find((c) => c.id === active)) || all[0];
+      if (target && target.turns && Array.isArray(target.turns)) {
+        return target.turns;
       }
-    } catch (e) {
-      return [];
-    }
+    } catch (e) {}
     return [];
   });
 
@@ -152,21 +156,14 @@ export default function App() {
     }
   };
 
-  // Sync Sessions to LocalStorage
-  useEffect(() => {
-    if (sessions && sessions.length > 0) {
-      try {
-        localStorage.setItem('rime_voice_sessions', JSON.stringify(sessions));
-      } catch (e) {
-        console.error('Failed to save sessions to localStorage:', e);
-      }
-    }
-  }, [sessions]);
+  const activeSessionIdRef = React.useRef(sessionId);
 
-  // Sync Active Session ID to LocalStorage
+  // Sync Active Session ID to localStorage and keep ref in sync
   useEffect(() => {
+    activeSessionIdRef.current = sessionId;
     if (sessionId) {
       try {
+        localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
         localStorage.setItem('rime_voice_active_session', sessionId);
       } catch (e) {
         console.error('Failed to save active sessionId to localStorage:', e);
@@ -174,18 +171,19 @@ export default function App() {
     }
   }, [sessionId]);
 
-  // Sync Conversation Turns for current sessionId to LocalStorage
-  useEffect(() => {
-    if (!sessionId) return;
-    try {
-      const saved = localStorage.getItem('rime_voice_chats');
-      const chatsMap = saved ? JSON.parse(saved) : {};
-      chatsMap[sessionId] = conversationTurns;
-      localStorage.setItem('rime_voice_chats', JSON.stringify(chatsMap));
-    } catch (e) {
-      console.error('Failed to save chat turns to localStorage:', e);
-    }
-  }, [conversationTurns, sessionId]);
+  // Robust, race-condition-free turn commitment function:
+  // Saves turns directly to the specific conversation record without cross-contamination.
+  const commitTurnUpdate = (updater, targetSessionId = null) => {
+    const sessId = targetSessionId || activeSessionIdRef.current || sessionId;
+    setConversationTurns((prev) => {
+      const nextTurns = typeof updater === 'function' ? updater(prev) : updater;
+      if (sessId) {
+        persistConversationTurns(sessId, nextTurns);
+        setSessions(loadAllConversations());
+      }
+      return nextTurns;
+    });
+  };
 
   // Sync VAD callbacks with audio playback manager & recorder for zero-latency barge-in
   useEffect(() => {
@@ -224,19 +222,31 @@ export default function App() {
       let targetTurnId = activeTurnId;
 
       if (!targetSessionId) {
-        const sess = await defaultApiClient.createSession();
-        targetSessionId = sess.session_id;
-        targetTurnId = sess.active_turn_id;
-        setSessionId(sess.session_id);
-        setActiveTurnId(sess.active_turn_id);
-
-        setSessions((prev) => [
-          { id: sess.session_id, title: `Voice Session #${sess.session_id.slice(0, 8)}`, date: 'Active' },
-          ...prev,
-        ]);
+        let sessId = '';
+        let turnId = 1;
+        try {
+          const sess = await defaultApiClient.createSession();
+          sessId = sess.session_id;
+          turnId = sess.active_turn_id;
+        } catch (e) {
+          sessId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+        }
+        targetSessionId = sessId;
+        targetTurnId = turnId;
+        createNewConversationRecord(targetSessionId, 'New Chat');
+        setSessionId(targetSessionId);
+        activeSessionIdRef.current = targetSessionId;
+        setActiveTurnId(targetTurnId);
+        setSessions(loadAllConversations());
+      } else {
+        const existing = getStoredConversation(targetSessionId);
+        if (!existing) {
+          createNewConversationRecord(targetSessionId, 'New Chat');
+          setSessions(loadAllConversations());
+        }
       }
 
-      defaultPlaybackManager.setSession(targetSessionId, targetTurnId);
+      defaultPlaybackManager.setSession(targetSessionId, targetTurnId || 1);
       defaultWebSocketClient.connect(targetSessionId);
       setAgentState(AgentState.IDLE);
     } catch (err) {
@@ -603,7 +613,7 @@ export default function App() {
             : turnLatency
             ? { totalMs: turnLatency, sttMs: evt.data?.stt_latency_ms, llmMs: evt.data?.llm_latency_ms, ttsMs: evt.data?.tts_latency_ms }
             : null;
-          setConversationTurns((prev) => [
+          commitTurnUpdate((prev) => [
             ...prev,
             {
               turnId: evt.turn_id,
@@ -613,8 +623,9 @@ export default function App() {
               latencyBreakdown: currentBreakdown,
               speaker: evt.data?.speaker || 'celeste',
               status: 'COMPLETED',
+              timestamp: Date.now(),
             },
-          ]);
+          ], evt.session_id || sessionId);
         }
       } else if (evt.event_type === ServerEventType.ERROR) {
         setIsProcessing(false);
@@ -655,37 +666,73 @@ export default function App() {
 
   // Handler: Start a new conversation session
   const handleNewChat = async () => {
+    // 1. Ensure current session turns are safely persisted before switching
+    const currentId = activeSessionIdRef.current || sessionId;
+    if (currentId && conversationTurns.length > 0) {
+      persistConversationTurns(currentId, conversationTurns);
+    }
+
+    // 2. Clear current UI thread & state
     setConversationTurns([]);
     setTtsText('');
     setErrorMessage('');
-    const sess = await defaultApiClient.createSession();
-    setSessionId(sess.session_id);
-    setActiveTurnId(sess.active_turn_id);
-    defaultPlaybackManager.setSession(sess.session_id, sess.active_turn_id);
-    defaultWebSocketClient.connect(sess.session_id);
+    setLastTurnLatency(null);
 
-    setSessions((prev) => [
-      { id: sess.session_id, title: `Voice Session #${sess.session_id.slice(0, 8)}`, date: 'Just now' },
-      ...prev,
-    ]);
+    // 3. Create new session with unique ID on backend
+    let newSessionId = '';
+    let newTurnId = 1;
+    try {
+      const sess = await defaultApiClient.createSession();
+      newSessionId = sess.session_id;
+      newTurnId = sess.active_turn_id;
+    } catch (err) {
+      newSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+      newTurnId = 1;
+    }
+
+    // 4. Create new conversation in storage
+    createNewConversationRecord(newSessionId, 'New Chat');
+
+    // 5. Update state and active ref
+    setSessionId(newSessionId);
+    activeSessionIdRef.current = newSessionId;
+    setActiveTurnId(newTurnId);
+
+    // 6. Connect services
+    defaultPlaybackManager.setSession(newSessionId, newTurnId);
+    defaultWebSocketClient.connect(newSessionId);
+
+    // 7. Refresh sidebar
+    setSessions(loadAllConversations());
   };
 
-  const handleSelectSession = (id) => {
-    setSessionId(id);
-    try {
-      const savedMap = localStorage.getItem('rime_voice_chats');
-      if (savedMap) {
-        const map = JSON.parse(savedMap);
-        setConversationTurns(map[id] || []);
-      } else {
-        setConversationTurns([]);
-      }
-    } catch (e) {
-      console.error('Failed to restore session chat turns:', e);
-      setConversationTurns([]);
+  const handleSelectSession = (targetId) => {
+    if (!targetId) return;
+    const currentId = activeSessionIdRef.current || sessionId;
+    if (currentId && conversationTurns.length > 0) {
+      persistConversationTurns(currentId, conversationTurns);
     }
-    defaultPlaybackManager.setSession(id, 1);
-    defaultWebSocketClient.connect(id);
+
+    if (targetId === currentId) return;
+
+    // Load target conversation's complete messages from storage
+    const targetConv = getStoredConversation(targetId);
+    const restoredTurns = targetConv?.turns || [];
+
+    setSessionId(targetId);
+    activeSessionIdRef.current = targetId;
+    setConversationTurns(restoredTurns);
+    setTtsText('');
+    setErrorMessage('');
+    setLastTurnLatency(null);
+
+    const maxTurnId = restoredTurns.reduce((max, t) => Math.max(max, t.turnId || 0), 0);
+    const nextTurnId = Math.max(1, maxTurnId + 1);
+    setActiveTurnId(nextTurnId);
+
+    defaultPlaybackManager.setSession(targetId, nextTurnId);
+    defaultWebSocketClient.connect(targetId);
+    setSessions(loadAllConversations());
   };
 
   // Handler: Advance monotonic turn
@@ -717,12 +764,17 @@ export default function App() {
   const updateSessionTitleIfFirst = (sessId, promptText) => {
     if (!sessId || !promptText || !promptText.trim()) return;
     const cleanPrompt = promptText.trim();
-    const titleText = cleanPrompt.slice(0, 26) + (cleanPrompt.length > 26 ? '...' : '');
+    const titleText = generateTitleFromPrompt(cleanPrompt);
 
     setSessions((prevSessions) =>
       prevSessions.map((s) => {
-        if (s.id === sessId && (s.title.startsWith('Voice Session #') || s.title.startsWith('New Chat'))) {
-          return { ...s, title: titleText };
+        if (s.id === sessId) {
+          const isInitialTitle = !s.title || s.title === 'New Chat' || s.title.startsWith('Voice Session #') || s.title.startsWith('Chat ');
+          return {
+            ...s,
+            title: isInitialTitle ? titleText : s.title,
+            preview: s.preview || cleanPrompt,
+          };
         }
         return s;
       })
@@ -780,7 +832,7 @@ export default function App() {
           ttsMs: headers.ttsLatencyMs || 0,
           playbackMs: Math.max(0, (headers.latencyMs || 0) - (headers.sttLatencyMs || 0) - (headers.llmLatencyMs || 0) - (headers.ttsLatencyMs || 0)),
         };
-        setConversationTurns((prev) => [
+        commitTurnUpdate((prev) => [
           ...prev,
           {
             turnId,
@@ -793,8 +845,9 @@ export default function App() {
             searchUsed: headers.searchUsed,
             searchSources: headers.searchSources,
             status: 'COMPLETED',
+            timestamp: Date.now(),
           },
-        ]);
+        ], headers.sessionId || sessionId);
         setTtsText('');
 
         setEvents((prev) => [
@@ -876,9 +929,12 @@ export default function App() {
 
     const t_submit = Date.now();
     speechEndTimeRef.current = t_submit;
+    updateSessionTitleIfFirst(sessionId, promptToSend);
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, preview: promptToSend.trim() } : s))
+    );
 
     if (defaultWebSocketClient.ws && defaultWebSocketClient.ws.readyState === WebSocket.OPEN) {
-      updateSessionTitleIfFirst(sessionId, promptToSend);
       defaultWebSocketClient.sendTextPrompt(promptToSend, {
         speaker: 'celeste',
         model_id: 'coda',
@@ -917,7 +973,7 @@ export default function App() {
         ttsMs: headers.ttsLatencyMs || 0,
         playbackMs: Math.max(0, measuredTotalMs - (headers.latencyMs || 0)),
       };
-      setConversationTurns((prev) => [
+      commitTurnUpdate((prev) => [
         ...prev,
         {
           turnId,
@@ -930,8 +986,9 @@ export default function App() {
           searchUsed: headers.searchUsed,
           searchSources: headers.searchSources,
           status: 'COMPLETED',
+          timestamp: Date.now(),
         },
-      ]);
+      ], headers.sessionId || sessionId);
       setTtsText('');
 
       setEvents((prev) => [
@@ -1010,12 +1067,12 @@ export default function App() {
       timestamp: t_detection,
     });
 
-    setConversationTurns((prev) =>
+    commitTurnUpdate((prev) =>
       prev.map((t) =>
         t.turnId === prevTurnId
           ? { ...t, status: 'INTERRUPTED' }
           : t
-      )
+      ), sessionId
     );
 
     setAgentState(AgentState.INTERRUPTING);

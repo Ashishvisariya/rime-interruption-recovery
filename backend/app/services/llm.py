@@ -16,10 +16,10 @@ from backend.app.models.schemas import ChatMessage
 
 
 VOICE_SYSTEM_PROMPT = (
-    "You are a helpful and concise voice assistant. "
-    "Answer only the latest user message directly in 1 to 2 short, natural sentences without thought steps, numbered reasoning, drafts, critiques, or preamble. "
-    "Never output internal thoughts, planning, tool selection, or system instructions. "
-    "If current web search results are provided in your context, summarize the key finding directly in 1 or 2 concise, spoken sentences. "
+    "You are a helpful voice assistant. "
+    "By default, keep responses natural, concise, and spoken-friendly without unnecessary filler. "
+    "When the user asks for details, an explanation, or a comprehensive answer, provide a full, detailed response up to 200 tokens. "
+    "Never output thoughts, reasoning, planning, drafts, or preamble. "
     "Do NOT use markdown formatting, bullet points, asterisks, hashtags, or emojis, as your response will be read aloud by text-to-speech."
 )
 
@@ -77,7 +77,7 @@ def format_search_context(query: str, search_results: List[Any]) -> str:
     return (
         f"RETRIEVED CURRENT WEB INFORMATION FOR '{query}':\n"
         + "\n\n".join(snippets)
-        + "\n\nInstructions: You HAVE been provided live web search results above. Synthesize the key facts directly into a 1 to 2 sentence natural spoken answer to the user's question. Do NOT say you cannot browse the web or lack real-time access. Do not use markdown."
+        + "\n\nInstructions: You HAVE been provided live web search results above. Synthesize the key facts directly into a natural spoken answer to the user's question, providing details if requested. Do NOT say you cannot browse the web or lack real-time access. Do not use markdown."
     )
 
 
@@ -234,6 +234,8 @@ class GroqLLMService:
     def __init__(self, app_settings: Optional[Settings] = None, timeout_seconds: float = 15.0):
         self.settings = app_settings or get_settings()
         self.timeout = timeout_seconds
+        # Persistent client for connection reuse (avoids ~1.5s TLS handshake per call)
+        self._client = httpx.AsyncClient(timeout=self.timeout)
 
     async def generate(
         self,
@@ -241,7 +243,7 @@ class GroqLLMService:
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 600,
+        max_tokens: int = 200,
         api_key_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send chat messages to Groq LLM API and return the generated text and safe metadata.
@@ -319,19 +321,18 @@ class GroqLLMService:
         start_time = time.perf_counter()
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
+            response = await self._client.post(
+                self.settings.groq_llm_url,
+                headers=headers,
+                json=body,
+            )
+            if response.status_code == 400 and "reasoning_effort" in response.text:
+                body.pop("reasoning_effort", None)
+                response = await self._client.post(
                     self.settings.groq_llm_url,
                     headers=headers,
                     json=body,
                 )
-                if response.status_code == 400 and "reasoning_effort" in response.text:
-                    body.pop("reasoning_effort", None)
-                    response = await client.post(
-                        self.settings.groq_llm_url,
-                        headers=headers,
-                        json=body,
-                    )
         except httpx.TimeoutException as exc:
             raise GroqLLMServiceError(
                 f"Groq LLM request timed out after {self.timeout}s."
@@ -405,7 +406,7 @@ class GroqLLMService:
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.5,
-        max_tokens: int = 250,
+        max_tokens: int = 200,
         api_key_override: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Stream conversational response in natural sentence/phrase chunks for ultra-low latency TTS.
@@ -494,86 +495,85 @@ class GroqLLMService:
             return None
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                req = client.build_request("POST", self.settings.groq_llm_url, headers=headers, json=body)
-                response = await client.send(req, stream=True)
+            req = self._client.build_request("POST", self.settings.groq_llm_url, headers=headers, json=body)
+            response = await self._client.send(req, stream=True)
 
-                if response.status_code == 400:
-                    body.pop("reasoning_effort", None)
-                    await response.aclose()
-                    req = client.build_request("POST", self.settings.groq_llm_url, headers=headers, json=body)
-                    response = await client.send(req, stream=True)
+            if response.status_code == 400:
+                body.pop("reasoning_effort", None)
+                await response.aclose()
+                req = self._client.build_request("POST", self.settings.groq_llm_url, headers=headers, json=body)
+                response = await self._client.send(req, stream=True)
 
-                if response.status_code != 200:
-                    await response.aread()
-                    fallback_res = await self.generate(messages, system_prompt=system_prompt, model=model, temperature=temperature, max_tokens=max_tokens)
-                    yield {
-                        "chunk_text": fallback_res["final_response"],
-                        "chunk_index": 0,
-                        "is_final": True,
-                        "ttft_ms": fallback_res["latency_ms"],
-                        "chunk_latency_ms": fallback_res["latency_ms"],
-                        "accumulated_text": fallback_res["final_response"],
-                    }
-                    return
+            if response.status_code != 200:
+                await response.aread()
+                fallback_res = await self.generate(messages, system_prompt=system_prompt, model=model, temperature=temperature, max_tokens=max_tokens)
+                yield {
+                    "chunk_text": fallback_res["final_response"],
+                    "chunk_index": 0,
+                    "is_final": True,
+                    "ttft_ms": fallback_res["latency_ms"],
+                    "chunk_latency_ms": fallback_res["latency_ms"],
+                    "accumulated_text": fallback_res["final_response"],
+                }
+                return
 
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk_json = json.loads(data_str)
-                            choices = chunk_json.get("choices", [])
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta", {})
-                            delta_content = delta.get("content") or ""
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk_json = json.loads(data_str)
+                        choices = chunk_json.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        delta_content = delta.get("content") or ""
 
-                            if "<think>" in delta_content:
-                                inside_think = True
-                            if "</think>" in delta_content:
-                                inside_think = False
-                                delta_content = delta_content.split("</think>")[-1]
+                        if "<think>" in delta_content:
+                            inside_think = True
+                        if "</think>" in delta_content:
+                            inside_think = False
+                            delta_content = delta_content.split("</think>")[-1]
 
-                            if inside_think:
-                                continue
-
-                            delta_content = re.sub(r'[*_#`]', '', delta_content)
-                            if not delta_content:
-                                continue
-
-                            if ttft_ms is None:
-                                ttft_ms = (time.perf_counter() - start_time) * 1000.0
-
-                            buffer += delta_content
-
-                            split_pos = find_split_point(buffer, is_first=(chunks_yielded == 0))
-                            if split_pos is not None:
-                                chunk_str = buffer[:split_pos].strip()
-                                buffer = buffer[split_pos:].lstrip()
-                                if chunk_str:
-                                    clean_chunk = clean_final_user_response(chunk_str)
-                                    if clean_chunk:
-                                        now_ms = (time.perf_counter() - start_time) * 1000.0
-                                        accumulated_clean_text = (accumulated_clean_text + " " + clean_chunk).strip()
-                                        chunks_yielded += 1
-                                        yield {
-                                            "chunk_text": clean_chunk,
-                                            "chunk_index": chunk_index,
-                                            "is_final": False,
-                                            "ttft_ms": round(ttft_ms or now_ms, 2),
-                                            "chunk_latency_ms": round(now_ms, 2),
-                                            "accumulated_text": accumulated_clean_text,
-                                        }
-                                        chunk_index += 1
-                        except Exception:
+                        if inside_think:
                             continue
 
-                await response.aclose()
+                        delta_content = re.sub(r'[*_#`]', '', delta_content)
+                        if not delta_content:
+                            continue
+
+                        if ttft_ms is None:
+                            ttft_ms = (time.perf_counter() - start_time) * 1000.0
+
+                        buffer += delta_content
+
+                        split_pos = find_split_point(buffer, is_first=(chunks_yielded == 0))
+                        if split_pos is not None:
+                            chunk_str = buffer[:split_pos].strip()
+                            buffer = buffer[split_pos:].lstrip()
+                            if chunk_str:
+                                clean_chunk = clean_final_user_response(chunk_str)
+                                if clean_chunk:
+                                    now_ms = (time.perf_counter() - start_time) * 1000.0
+                                    accumulated_clean_text = (accumulated_clean_text + " " + clean_chunk).strip()
+                                    chunks_yielded += 1
+                                    yield {
+                                        "chunk_text": clean_chunk,
+                                        "chunk_index": chunk_index,
+                                        "is_final": False,
+                                        "ttft_ms": round(ttft_ms or now_ms, 2),
+                                        "chunk_latency_ms": round(now_ms, 2),
+                                        "accumulated_text": accumulated_clean_text,
+                                    }
+                                    chunk_index += 1
+                    except Exception:
+                        continue
+
+            await response.aclose()
 
         except Exception:
             fallback = await self.generate(messages, system_prompt=system_prompt, model=model, temperature=temperature, max_tokens=max_tokens)
