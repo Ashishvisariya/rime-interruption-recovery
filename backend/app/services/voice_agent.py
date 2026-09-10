@@ -585,6 +585,16 @@ class VoiceAgentOrchestrator:
 
                 full_response_text = (full_response_text + " " + chunk_text).strip()
 
+                # Yield TEXT_CHUNK immediately so client can progressively render text in parallel
+                yield {
+                    "type": "TEXT_CHUNK",
+                    "chunk_index": chunk.get("chunk_index", 0),
+                    "text": chunk_text,
+                    "accumulated_text": full_response_text,
+                    "is_final": chunk.get("is_final", False),
+                    "llm_ttft_ms": chunk.get("ttft_ms"),
+                }
+
                 t_tts_start = time.perf_counter()
                 try:
                     audio_bytes_out, tts_metadata = await self.rime_service.synthesize(

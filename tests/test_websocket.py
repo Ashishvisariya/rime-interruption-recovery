@@ -637,3 +637,39 @@ async def test_websocket_session_cleanup():
     assert "sess_purge_20" not in default_ws_manager._connections
     assert "sess_purge_20" not in default_ws_manager._audio_buffers
     assert len(default_cancellation_manager.get_active_tasks("sess_purge_20")) == 0
+
+
+# =====================================================================
+# Test 21: Progressive Text Chunk Streaming
+# =====================================================================
+@pytest.mark.asyncio
+async def test_websocket_text_chunk_streaming():
+    """Scenario 21: TEXT_CHUNK events are sent progressively to client with turn validation."""
+    session = default_session_store.get_or_create_session("sess_text_stream_21")
+    t1 = session.create_next_turn("Explain photosynthesis")
+
+    mock_ws = MagicMock()
+    mock_ws.send_text = AsyncMock()
+
+    # Send TEXT_CHUNK event
+    sent = await default_ws_manager.send_event(
+        websocket=mock_ws,
+        session_id="sess_text_stream_21",
+        turn_id=t1,
+        event_type=WebSocketEventType.TEXT_CHUNK,
+        data={
+            "text_chunk": "Photosynthesis is the process",
+            "accumulated_text": "Photosynthesis is the process",
+            "chunk_index": 0,
+            "is_final": False,
+        },
+        validate_turn=True,
+    )
+
+    assert sent is True
+    assert mock_ws.send_text.call_count == 1
+    sent_payload = json.loads(mock_ws.send_text.call_args[0][0])
+    assert sent_payload["event_type"] == "TEXT_CHUNK"
+    assert sent_payload["turn_id"] == 1
+    assert sent_payload["data"]["text_chunk"] == "Photosynthesis is the process"
+

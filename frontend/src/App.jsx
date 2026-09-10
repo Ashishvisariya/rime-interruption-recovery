@@ -88,6 +88,14 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [metricAE2eLatencyMs, setMetricAE2eLatencyMs] = useState(null);
   const [lastTurnLatency, setLastTurnLatency] = useState(null);
+  const [streamingAssistantText, setStreamingAssistantText] = useState('');
+  const streamingTurnIdRef = React.useRef(0);
+  const activeTurnIdRef = React.useRef(activeTurnId);
+
+  useEffect(() => {
+    activeTurnIdRef.current = activeTurnId;
+  }, [activeTurnId]);
+
   // Audio device state & microphone testing
   const [micLevel, setMicLevel] = useState(0);
   const [audioDevices, setAudioDevices] = useState([]);
@@ -208,6 +216,9 @@ export default function App() {
       defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
       defaultPlaybackManager.setActiveTurn(newTurnId);
       setActiveTurnId(newTurnId);
+      activeTurnIdRef.current = newTurnId;
+      setStreamingAssistantText('');
+      streamingTurnIdRef.current = 0;
     };
   }, [agentState, sessionId, activeTurnId]);
 
@@ -451,6 +462,9 @@ export default function App() {
         defaultPlaybackManager.stopCurrentAudio('vad_barge_in');
         defaultPlaybackManager.setActiveTurn(evt.newTurnId);
         setActiveTurnId(evt.newTurnId);
+        activeTurnIdRef.current = evt.newTurnId;
+        setStreamingAssistantText('');
+        streamingTurnIdRef.current = 0;
 
         const t_stop = Date.now();
         const stopLatencyMs = t_stop - t_detection;
@@ -549,11 +563,15 @@ export default function App() {
         if (evt.data?.active_turn_id !== undefined) {
           setActiveTurnId(evt.data.active_turn_id);
           defaultPlaybackManager.setActiveTurn(evt.data.active_turn_id);
+          activeTurnIdRef.current = evt.data.active_turn_id;
         }
       } else if (evt.event_type === ServerEventType.TURN_STARTED) {
         if (evt.turn_id) {
           setActiveTurnId(evt.turn_id);
           defaultPlaybackManager.setActiveTurn(evt.turn_id);
+          activeTurnIdRef.current = evt.turn_id;
+          streamingTurnIdRef.current = evt.turn_id;
+          setStreamingAssistantText('');
         }
       } else if (evt.event_type === ServerEventType.TRANSCRIPT) {
         if (evt.data?.transcript) {
@@ -565,8 +583,25 @@ export default function App() {
         }
       } else if (evt.event_type === ServerEventType.THINKING) {
         setAgentState(AgentState.THINKING);
+      } else if (evt.event_type === ServerEventType.TEXT_CHUNK) {
+        // Monotonic turn guard: only process chunks for the currently active turn
+        if (evt.turn_id && (evt.turn_id === activeTurnIdRef.current || evt.turn_id === streamingTurnIdRef.current)) {
+          const textChunk = evt.data?.text_chunk || '';
+          const accumText = evt.data?.accumulated_text;
+          if (accumText) {
+            setStreamingAssistantText(accumText);
+          } else if (textChunk) {
+            setStreamingAssistantText((prev) => (prev ? prev + ' ' + textChunk : textChunk).trim());
+          }
+        }
       } else if (evt.event_type === ServerEventType.AUDIO_STARTED) {
         setAgentState(AgentState.PLAYING);
+        if (evt.turn_id && (evt.turn_id === activeTurnIdRef.current || evt.turn_id === streamingTurnIdRef.current)) {
+          const initialText = evt.data?.assistant_text || evt.data?.response || evt.data?.final_response;
+          if (initialText) {
+            setStreamingAssistantText((prev) => prev || initialText);
+          }
+        }
       } else if (evt.event_type === ServerEventType.AUDIO_DATA) {
         if (evt.turn_id && (evt.data?.audio_chunk || evt.data?.audio_b64)) {
           const rawAudio = evt.data.audio_chunk || evt.data.audio_b64;
@@ -590,18 +625,36 @@ export default function App() {
               }
             }
           );
+
+          // If TEXT_CHUNK was not received first, fallback to populating progressive text from AUDIO_DATA
+          if (evt.data?.text_chunk && (evt.turn_id === activeTurnIdRef.current || evt.turn_id === streamingTurnIdRef.current)) {
+            setStreamingAssistantText((prev) => {
+              if (!prev) return evt.data.text_chunk;
+              if (!prev.includes(evt.data.text_chunk)) {
+                return (prev + ' ' + evt.data.text_chunk).trim();
+              }
+              return prev;
+            });
+          }
         }
       } else if (evt.event_type === ServerEventType.AUDIO_STOP) {
         defaultPlaybackManager.stopCurrentAudio('server_audio_stop');
+        setStreamingAssistantText('');
+        streamingTurnIdRef.current = 0;
         setAgentState(AgentState.INTERRUPTING);
       } else if (evt.event_type === ServerEventType.TURN_INTERRUPTED) {
         if (evt.data?.new_turn_id) {
           setActiveTurnId(evt.data.new_turn_id);
           defaultPlaybackManager.setActiveTurn(evt.data.new_turn_id);
+          activeTurnIdRef.current = evt.data.new_turn_id;
         }
+        setStreamingAssistantText('');
+        streamingTurnIdRef.current = 0;
         setAgentState(AgentState.RECOVERING);
       } else if (evt.event_type === ServerEventType.TURN_COMPLETED) {
         setIsProcessing(false);
+        setStreamingAssistantText('');
+        streamingTurnIdRef.current = 0;
         const candidateResponse = evt.data?.response || evt.data?.final_response || evt.data?.assistant_response;
         if (candidateResponse) {
           const validatedResponse = sanitizeFinalResponse(candidateResponse);
@@ -630,12 +683,16 @@ export default function App() {
       } else if (evt.event_type === ServerEventType.ERROR) {
         setIsProcessing(false);
         setIsLoading(false);
+        setStreamingAssistantText('');
+        streamingTurnIdRef.current = 0;
         setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
         setErrorMessage(`Server Error: ${evt.data?.error || 'Unknown server error'}`);
         console.error('[WS] Server Error:', evt.data?.error);
       } else if (evt.event_type === ServerEventType.TURN_CANCELLED) {
         setIsProcessing(false);
         setIsLoading(false);
+        setStreamingAssistantText('');
+        streamingTurnIdRef.current = 0;
         setAgentState(isVADActive ? AgentState.LISTENING : AgentState.IDLE);
         console.log('[WS] Turn cancelled cleanly:', evt.data);
       }
@@ -674,6 +731,8 @@ export default function App() {
 
     // 2. Clear current UI thread & state
     setConversationTurns([]);
+    setStreamingAssistantText('');
+    streamingTurnIdRef.current = 0;
     setTtsText('');
     setErrorMessage('');
     setLastTurnLatency(null);
@@ -722,6 +781,8 @@ export default function App() {
     setSessionId(targetId);
     activeSessionIdRef.current = targetId;
     setConversationTurns(restoredTurns);
+    setStreamingAssistantText('');
+    streamingTurnIdRef.current = 0;
     setTtsText('');
     setErrorMessage('');
     setLastTurnLatency(null);
@@ -729,6 +790,7 @@ export default function App() {
     const maxTurnId = restoredTurns.reduce((max, t) => Math.max(max, t.turnId || 0), 0);
     const nextTurnId = Math.max(1, maxTurnId + 1);
     setActiveTurnId(nextTurnId);
+    activeTurnIdRef.current = nextTurnId;
 
     defaultPlaybackManager.setSession(targetId, nextTurnId);
     defaultWebSocketClient.connect(targetId);
@@ -744,6 +806,9 @@ export default function App() {
       setPreviousTurnId(prev);
       setPreviousTurnStatus('SUPERSEDED');
       setActiveTurnId(updatedSess.active_turn_id);
+      activeTurnIdRef.current = updatedSess.active_turn_id;
+      setStreamingAssistantText('');
+      streamingTurnIdRef.current = 0;
       defaultPlaybackManager.setActiveTurn(updatedSess.active_turn_id);
       setEvents((prevEvents) => [
         {
@@ -1044,6 +1109,8 @@ export default function App() {
   // Handler: Stop Active Audio Output
   const handleStopAudio = () => {
     defaultPlaybackManager.stopCurrentAudio('user_click_stop');
+    setStreamingAssistantText('');
+    streamingTurnIdRef.current = 0;
     setAgentState(AgentState.IDLE);
   };
 
@@ -1057,6 +1124,10 @@ export default function App() {
 
     defaultPlaybackManager.stopCurrentAudio('manual_barge_in');
     defaultPlaybackManager.setActiveTurn(nextTurnId);
+    setActiveTurnId(nextTurnId);
+    activeTurnIdRef.current = nextTurnId;
+    setStreamingAssistantText('');
+    streamingTurnIdRef.current = 0;
 
     const t_stop = Date.now();
     const stopLatencyMs = t_stop - t_detection;
@@ -1381,8 +1452,9 @@ export default function App() {
         <ChatThread
           conversationTurns={conversationTurns}
           currentTranscript={ttsText}
+          streamingAssistantText={streamingAssistantText}
           isListening={isRecording || agentState === AgentState.LISTENING}
-          isProcessing={isProcessing || agentState === AgentState.THINKING || agentState === AgentState.SYNTHESIZING}
+          isProcessing={isProcessing || agentState === AgentState.THINKING || agentState === AgentState.SYNTHESIZING || (agentState === AgentState.PLAYING && Boolean(streamingAssistantText))}
           agentState={agentState}
           activeTurnId={activeTurnId}
         />

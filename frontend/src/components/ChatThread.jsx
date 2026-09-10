@@ -4,6 +4,7 @@ import { IconUser, IconBot, IconZap, IconSparkles } from './Icons.jsx';
 export default function ChatThread({
   conversationTurns = [],
   currentTranscript = '',
+  streamingAssistantText = '',
   isListening,
   isProcessing,
   agentState,
@@ -22,14 +23,16 @@ export default function ChatThread({
 
   useEffect(() => {
     scrollToBottom();
-  }, [conversationTurns, currentTranscript, isListening, isProcessing, agentState]);
+  }, [conversationTurns, currentTranscript, streamingAssistantText, isListening, isProcessing, agentState]);
 
   const hasTurns = conversationTurns && conversationTurns.length > 0;
+  const hasStreamingText = Boolean(streamingAssistantText && streamingAssistantText.trim().length > 0);
   const isPendingTurn =
     Boolean(isListening) ||
     Boolean(isProcessing) ||
     ['LISTENING', 'TRANSCRIBING', 'THINKING', 'SYNTHESIZING'].includes(agentState) ||
-    Boolean(currentTranscript && currentTranscript.trim().length > 0);
+    Boolean(currentTranscript && currentTranscript.trim().length > 0) ||
+    hasStreamingText;
 
   const getAssistantStatusLabel = () => {
     switch (agentState) {
@@ -205,14 +208,21 @@ export default function ChatThread({
                 <div className="msg-bubble assistant-bubble-content">
                   <div className="msg-header">
                     <span className="msg-author">Voice Assistant · Rime</span>
-                    <span className="turn-status-tag tag-live-state">
+                    <span className={`turn-status-tag ${agentState === 'PLAYING' ? 'tag-speaking' : 'tag-live-state'}`}>
                       {getAssistantStatusLabel()}
                     </span>
                   </div>
-                  <div className="msg-text processing-text">
-                    <span className="typing-dots">
-                      {getAssistantProcessingMessage()}
-                    </span>
+                  <div className={`msg-text ${hasStreamingText ? 'streaming-text-active' : 'processing-text'}`}>
+                    {hasStreamingText ? (
+                      <span className="streaming-text-content">
+                        {streamingAssistantText}
+                        <span className="streaming-cursor"></span>
+                      </span>
+                    ) : (
+                      <span className="typing-dots">
+                        {getAssistantProcessingMessage()}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

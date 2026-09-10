@@ -68,6 +68,7 @@ class WebSocketEventType:
     # Assistant Output Progression
     TRANSCRIPT = "TRANSCRIPT"
     THINKING = "THINKING"
+    TEXT_CHUNK = "TEXT_CHUNK"
     AUDIO_STARTED = "AUDIO_STARTED"
     AUDIO_STOP = "AUDIO_STOP"
 
@@ -524,6 +525,21 @@ class VoiceWebSocketManager:
                             "transcript": chunk.get("transcript", ""),
                             "is_final": True,
                             "stt_latency_ms": chunk.get("stt_latency_ms", 0.0),
+                        },
+                        validate_turn=True,
+                    )
+                elif chunk_type == "TEXT_CHUNK":
+                    await self.send_event(
+                        websocket=websocket,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        event_type=WebSocketEventType.TEXT_CHUNK,
+                        data={
+                            "text_chunk": chunk.get("text", ""),
+                            "accumulated_text": chunk.get("accumulated_text", ""),
+                            "chunk_index": chunk.get("chunk_index", 0),
+                            "is_final": chunk.get("is_final", False),
+                            "llm_ttft_ms": chunk.get("llm_ttft_ms"),
                         },
                         validate_turn=True,
                     )
