@@ -1,6 +1,15 @@
 # Voice AI Assistant with Interruption & Recovery
 *DataForge 2026 Rime Hackathon Submission*
 
+
+demo video:- https://drive.google.com/file/d/18CxlSAaPEIsbY0RD3Upxf5hlah3t9gzX/view?usp=drive_link
+
+live application link :- https://rime-interruption-recovery-s5f7.onrender.com/
+
+GitHub Repo link :- https://github.com/princeVerma73/rime-interruption-recovery
+
+
+
 ## 1. Project Overview & Name
 **Project Name:** Voice AI Assistant with Interruption & Recovery  
 **Primary TTS Provider:** Rime Labs (Ultra-low latency, expressive conversational voice output)
@@ -30,7 +39,7 @@ Voice communication is intrinsically bidirectional, continuous, and dynamic. Unl
 
 ---
 
-## 6. Architecture & Concurrency Model *(Detailed in [docs/architecture.md](file:///c:/INTERNSHIP/rime-interruption-recovery/docs/architecture.md))*
+## 6. Architecture & Concurrency Model *(Detailed in [docs/architecture.md](docs/architecture.md))*
 
 ```
 Microphone Stream ──▶ Audio Input / VAD ──▶ STT Service ──▶ Turn Manager (Active Turn ID: N)
@@ -128,7 +137,12 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
   - **Search Intent Detection:** Heuristic query classifier (`is_search_query` in `backend/app/services/llm.py`) selectively triggering web search only when current/latest information is needed, avoiding search overhead for static knowledge.
   - **Search Interruption & Stale-Result Protection:** Tavily operations are bound to `(session_id, turn_id)` with two-phase turn validation (`session.validate_turn`). If an interruption occurs mid-search, the search results are discarded immediately and never reach the LLM or Rime TTS.
   - **Speech Input Capture & STT Diagnostic Fix:** Diagnosed and resolved the root cause of speech capture failure (microphone stream contention and `getUserMedia` re-negotiation latency clipping the first 300-600ms of speech upon VAD onset). Harmonized audio constraints (`echoCancellation: true`, `noiseSuppression: true`, `autoGainControl: true`) and enabled direct stream sharing from VAD to `MicrophoneRecorder` with zero-latency speech capture.
-  - **Full Test Suite & Build Verification:** 177 backend automated tests passing (100%), 56 frontend automated tests passing (100%), clean Vite production build.
+   - **Full Test Suite & Build Verification:** 177 backend automated tests passing (100%), 56 frontend automated tests passing (100%), clean Vite production build.
+
+### Current Scope
+The current implementation is a browser client backed by FastAPI. It supports push-to-talk recording, browser VAD/barge-in detection, Groq Whisper transcription, Groq LLM responses, optional Tavily search for current-information queries, Rime TTS playback, and a full-duplex WebSocket path. API credentials remain server-side; the frontend talks only to the local backend.
+
+The Phase 15 benchmark validates turn cancellation and stale-result protection with live Rime and Groq calls. Its stress delay and playback harness are local test fixtures, so the reported stop latency is application-level state-machine latency rather than end-to-end speaker latency.
 
 ---
 
@@ -137,14 +151,16 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+ and npm
-- Valid API keys (`RIME_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY`)
+- Required by the current settings validation: `RIME_API_KEY`, `GROQ_API_KEY`, and `GEMINI_API_KEY`
+- Optional: `TAVILY_API_KEY` enables current-information web search; without it, search-dependent requests are unavailable
 
 ### Backend Setup & Run
-1. Configure environment template:
+1. Configure the environment template:
    ```bash
    cp backend/.env.example backend/.env
-   # Edit backend/.env with your API credentials (kept server-side & git-ignored)
+   # Edit backend/.env with your API credentials (kept server-side and git-ignored)
    ```
+   On Windows PowerShell, use `Copy-Item backend/.env.example backend/.env` instead of `cp`.
 2. Install Python dependencies:
    ```bash
    pip install -r backend/requirements.txt
@@ -179,6 +195,14 @@ Client Playback ◀── Rime TTS API ◀── Stale Guard Buffer ◀── LL
    - **Record Voice (Mic PTT):** Click the Push-to-Talk button, grant microphone permission, speak your prompt, and click to finish recording. Audio is sent to `/api/voice/transcribe` and the transcript is populated directly into the input field.
    - **Advance Turn:** Atomically advances monotonic turn $N \rightarrow N+1$.
    - **Synthesize & Play Rime Audio:** Fetches genuine Rime audio from `/api/voice/tts` and streams via `AudioPlaybackManager`.
-   - **Stop / Interrupt Speech:** Immediately halts active audio output, detaches media stream, and logs the interruption event.
+   - **Stop / Interrupt Speech:** Immediately halts active audio output, advances the server turn, cancels obsolete tasks on a best-effort basis, and rejects any late stale result.
+
+### Main API Surfaces
+- REST API documentation: `http://127.0.0.1:8000/docs`
+- Health probe: `GET /health`
+- Session and interruption lifecycle: `/api/voice/session/...`
+- Component endpoints: `POST /api/voice/transcribe`, `/api/voice/respond`, and `/api/voice/tts`
+- End-to-end agent endpoints: `POST /api/voice/agent/process-audio`, `/process-text`, and `/chat`
+- Full-duplex WebSocket: `/api/voice/ws/{session_id}` or `/api/voice/ws`
 
 
