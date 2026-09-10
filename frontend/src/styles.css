@@ -1804,15 +1804,15 @@ body {
 
 .chat-input-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border-card);
-  border-radius: 9999px;
-  padding: 4px 8px 4px 14px;
+  border-radius: 20px;
+  padding: 6px 8px 6px 14px;
   backdrop-filter: blur(16px);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
-  transition: border-color 0.2s ease;
+  transition: border-color 0.2s ease, border-radius 0.2s ease;
 }
 
 .chat-input-bar:focus-within {
@@ -1972,7 +1972,22 @@ body {
   color: var(--text-primary);
   font-size: 0.95rem;
   font-family: var(--font-main);
-  padding: 4px 8px;
+  padding: 6px 4px;
+  resize: none;
+  line-height: 1.45;
+  min-height: 28px;
+  max-height: 84px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.chat-text-input::-webkit-scrollbar {
+  width: 4px;
+}
+
+.chat-text-input::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
 }
 
 .chat-text-input::placeholder {
@@ -1993,6 +2008,7 @@ body {
   cursor: pointer;
   transition: all 0.2s ease;
   flex-shrink: 0;
+  margin-bottom: 2px;
 }
 
 .input-send-btn:hover:not(:disabled) {

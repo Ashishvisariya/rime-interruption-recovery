@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useLayoutEffect } from 'react';
 import QuickPrompts from './QuickPrompts.jsx';
 import RoundAiButton from './RoundAiButton.jsx';
 import { PlaybackState } from '../services/audio.js';
@@ -24,6 +24,16 @@ export default function ChatInput({
   const isThinking = isProcessing || isLoading || agentState === 'THINKING' || agentState === 'TRANSCRIBING' || agentState === 'SYNTHESIZING';
   const isListening = isRecording || agentState === 'LISTENING';
   const isInterrupting = agentState === 'INTERRUPTING';
+
+  const textareaRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      // Cap max height for ~3 lines (around 84px)
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 84)}px`;
+    }
+  }, [text]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -67,14 +77,15 @@ export default function ChatInput({
 
       {/* 3. Text Input & Manual Fallback Bar */}
       <div className="chat-input-bar">
-        <input
+        <textarea
           id="tts-text-input"
-          type="text"
+          ref={textareaRef}
           className="chat-text-input"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={getPlaceholder()}
+          rows={1}
         />
 
         <button
@@ -96,6 +107,7 @@ export default function ChatInput({
     </div>
   );
 }
+
 
 
 
