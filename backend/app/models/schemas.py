@@ -50,7 +50,7 @@ class LLMRequest(BaseModel):
     messages: List[ChatMessage] = Field(..., min_length=1, description="List of conversational messages")
     system_prompt: Optional[str] = Field(default=None, description="Optional custom system instruction")
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
-    max_tokens: Optional[int] = Field(default=256, ge=1, le=4096, description="Max tokens to generate")
+    max_tokens: Optional[int] = Field(default=200, ge=1, le=4096, description="Max tokens to generate")
 
 
 class LLMResponse(BaseModel):

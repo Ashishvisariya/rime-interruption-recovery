@@ -10,15 +10,56 @@ export default function ChatThread({
   activeTurnId,
 }) {
   const scrollRef = useRef(null);
+  const messagesEndRef = useRef(null);
 
-  useEffect(() => {
-    if (scrollRef.current) {
+  const scrollToBottom = () => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    } else if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
+  };
+
+  useEffect(() => {
+    scrollToBottom();
   }, [conversationTurns, currentTranscript, isListening, isProcessing, agentState]);
 
   const hasTurns = conversationTurns && conversationTurns.length > 0;
-  const isPendingTurn = (isListening || isProcessing) && Boolean(currentTranscript.trim());
+  const isPendingTurn =
+    Boolean(isListening) ||
+    Boolean(isProcessing) ||
+    ['LISTENING', 'TRANSCRIBING', 'THINKING', 'SYNTHESIZING'].includes(agentState) ||
+    Boolean(currentTranscript && currentTranscript.trim().length > 0);
+
+  const getAssistantStatusLabel = () => {
+    switch (agentState) {
+      case 'TRANSCRIBING':
+        return 'Transcribing...';
+      case 'THINKING':
+        return 'Thinking...';
+      case 'SYNTHESIZING':
+        return 'Synthesizing voice...';
+      case 'PLAYING':
+        return 'Speaking...';
+      default:
+        return isListening ? 'Listening...' : 'Processing...';
+    }
+  };
+
+  const getAssistantProcessingMessage = () => {
+    switch (agentState) {
+      case 'TRANSCRIBING':
+        return 'Transcribing speech...';
+      case 'THINKING':
+        return 'Generating response...';
+      case 'SYNTHESIZING':
+        return 'Synthesizing voice via Rime TTS...';
+      case 'PLAYING':
+        return 'Speaking...';
+      default:
+        return isListening ? 'Listening to speech...' : 'Processing...';
+    }
+  };
 
   return (
     <div className="chat-thread-container" ref={scrollRef}>
@@ -35,6 +76,8 @@ export default function ChatThread({
         <div className="chat-messages-list">
           {conversationTurns.map((turn, idx) => {
             const isInterrupted = turn.status === 'INTERRUPTED' || turn.status === 'CANCELLED';
+            const isSpeaking = agentState === 'PLAYING' && (turn.turnId === activeTurnId || idx === conversationTurns.length - 1);
+
             return (
               <div key={turn.turnId || idx} className="chat-turn-group">
                 {/* User Message */}
@@ -68,7 +111,12 @@ export default function ChatThread({
                       )}
                       {isInterrupted && (
                         <span className="turn-status-tag tag-interrupted">
-                          <IconZap size={11} style={{ marginRight: 3 }} /> INTERRUPTED
+                          <span className="tag-bolt">⚡</span> INTERRUPTED
+                        </span>
+                      )}
+                      {isSpeaking && !isInterrupted && (
+                        <span className="turn-status-tag tag-speaking">
+                          🔊 Speaking...
                         </span>
                       )}
                     </div>
@@ -96,23 +144,28 @@ export default function ChatThread({
                       </div>
                     )}
 
-                    {/* One small inline row for latency */}
+                    {/* Small inline row for latency - Matching screenshot */}
                     {turn.latencyBreakdown && turn.latencyBreakdown.totalMs ? (
                       <div className="msg-latency-row">
-                        <span className="latency-total">⚡ {(turn.latencyBreakdown.totalMs / 1000).toFixed(2)}s</span>
-                        {turn.latencyBreakdown.sttMs !== undefined && (
+                        <span className="latency-icon">⚡</span>
+                        <span className="latency-total">{(turn.latencyBreakdown.totalMs / 1000).toFixed(2)}s</span>
+                        {turn.latencyBreakdown.sttMs !== undefined && turn.latencyBreakdown.sttMs > 0 && (
                           <span className="latency-part"> · STT {(turn.latencyBreakdown.sttMs / 1000).toFixed(2)}s</span>
                         )}
-                        {turn.latencyBreakdown.llmMs !== undefined && (
+                        {turn.latencyBreakdown.llmMs !== undefined && turn.latencyBreakdown.llmMs > 0 && (
                           <span className="latency-part"> · LLM {(turn.latencyBreakdown.llmMs / 1000).toFixed(2)}s</span>
                         )}
-                        {turn.latencyBreakdown.ttsMs !== undefined && (
+                        {turn.latencyBreakdown.ttsMs !== undefined && turn.latencyBreakdown.ttsMs > 0 && (
                           <span className="latency-part"> · Rime {(turn.latencyBreakdown.ttsMs / 1000).toFixed(2)}s</span>
                         )}
                       </div>
                     ) : turn.latencyMs ? (
                       <div className="msg-latency-row">
-                        <span className="latency-total">⚡ {(turn.latencyMs / 1000).toFixed(2)}s</span>
+                        <span className="latency-icon">⚡</span>
+                        <span className="latency-total">{(turn.latencyMs / 1000).toFixed(2)}s</span>
+                        {turn.sttLatencyMs ? (
+                          <span className="latency-part"> · STT {(turn.sttLatencyMs / 1000).toFixed(2)}s</span>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -121,7 +174,7 @@ export default function ChatThread({
             );
           })}
 
-          {/* Pending In-Flight Turn */}
+          {/* Pending In-Flight Turn (Live Transcribing / Speaking / Thinking) */}
           {isPendingTurn && (
             <div className="chat-turn-group pending-turn-group">
               <div className="chat-msg user-msg">
@@ -131,9 +184,17 @@ export default function ChatThread({
                 <div className="msg-bubble user-bubble-content">
                   <div className="msg-header">
                     <span className="msg-author">You</span>
-                    <span className="msg-turn-tag">Turn #{activeTurnId}</span>
+                    {activeTurnId && <span className="msg-turn-tag">Turn #{activeTurnId}</span>}
                   </div>
-                  <div className="msg-text">{currentTranscript}</div>
+                  <div className="msg-text">
+                    {currentTranscript && currentTranscript.trim().length > 0 ? (
+                      currentTranscript
+                    ) : (
+                      <span className="live-transcribing-placeholder">
+                        <span className="live-pulse-dot"></span> Listening...
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -143,24 +204,21 @@ export default function ChatThread({
                 </div>
                 <div className="msg-bubble assistant-bubble-content">
                   <div className="msg-header">
-                    <span className="msg-author">Voice Assistant</span>
-                    <span className="turn-status-tag tag-authoritative">IN PROGRESS</span>
+                    <span className="msg-author">Voice Assistant · Rime</span>
+                    <span className="turn-status-tag tag-live-state">
+                      {getAssistantStatusLabel()}
+                    </span>
                   </div>
                   <div className="msg-text processing-text">
                     <span className="typing-dots">
-                      {agentState === 'TRANSCRIBING'
-                        ? 'Transcribing speech...'
-                        : agentState === 'THINKING'
-                        ? 'Generating response...'
-                        : agentState === 'SYNTHESIZING'
-                        ? 'Synthesizing voice via Rime TTS...'
-                        : 'Processing...'}
+                      {getAssistantProcessingMessage()}
                     </span>
                   </div>
                 </div>
               </div>
             </div>
           )}
+          <div ref={messagesEndRef} />
         </div>
       )}
     </div>
