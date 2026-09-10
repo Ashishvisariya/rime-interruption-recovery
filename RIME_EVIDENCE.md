@@ -3,8 +3,10 @@
 **Project:** Voice AI Assistant with Interruption & Recovery  
 **Hackathon:** DataForge 2026 Rime Hackathon  
 **Primary TTS Provider:** Rime Labs (Ultra-Low Latency Conversational Voice Output)  
-**Verification Phase:** Phase 15 — Real Acceptance Benchmark & Evidence Complete  
-**Benchmark Artifact:** [demo/benchmark_results_phase15.json](file:///c:/INTERNSHIP/rime-interruption-recovery/demo/benchmark_results_phase15.json)  
+**Verification Phase:** Phase 15 — Real Acceptance Benchmark (completed)  
+**Current Implementation:** Phase 16 — Tavily Web Search & Speech Input Diagnostics Fix  
+**Benchmark Artifact:** [demo/benchmark_results_phase15.json](demo/benchmark_results_phase15.json)  
+**Recorded:** 2026-09-07 (UTC)  
 
 ---
 
@@ -94,7 +96,7 @@ To rigorously validate this claim without fabrication or estimation, a standalon
 - **Rime Speaker / Voice:** `celeste`
 - **Rime Language:** `en`
 - **Rime Audio Format:** `mp3` (`audio/mpeg`)
-- **Rime Transport:** REST HTTP/1.1 POST and Full-Duplex WebSocket gateway
+- **Rime Transport:** REST HTTP/1.1 POST; the application also exposes a full-duplex WebSocket gateway
 - **Groq STT Model:** `whisper-large-v3` (`https://api.groq.com/openai/v1/audio/transcriptions`)
 - **Groq LLM Model:** `qwen/qwen3.6-27b` (`https://api.groq.com/openai/v1/chat/completions`)
 - **Google Gemini:** `0 calls` (Enforced & Audited)
@@ -138,7 +140,7 @@ To reproduce the exact 20-trial benchmark independently:
    ```
 3. Inspect output summary on stdout and the generated machine-readable artifact:
    ```bash
-   cat demo/benchmark_results_phase15.json
+   Get-Content demo/benchmark_results_phase15.json
    ```
 
 ---
@@ -148,3 +150,4 @@ To reproduce the exact 20-trial benchmark independently:
 - **Acoustic vs. Application Latency:** The measured stop latency (0.068 ms – 0.196 ms) represents the application-level execution time of stopping the playback state machine, flushing audio queues, and clearing media buffers. Hardware speaker acoustic output latency is governed by physical OS audio drivers.
 - **Controlled Test Fixtures:** The artificial 0.35s delay in stress trials is strictly a local test fixture to simulate asynchronous delay and verify race-condition immunity. It does not represent provider API latency.
 - **Cancellation Semantics:** No provider-side cancellation is claimed; all cancellation and stale-result rejections are enforced authoritatively by the application's Turn and Cancellation Managers.
+- **Provider/model drift:** The benchmark records the provider configuration used on 2026-09-07. Defaults or upstream availability may change; inspect `backend/app/config.py` and the generated JSON artifact before comparing a future run.

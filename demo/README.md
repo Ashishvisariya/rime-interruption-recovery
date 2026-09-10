@@ -50,7 +50,7 @@ From the repository root:
 python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Backend will start at: `http://localhost:8000` with WebSocket endpoint at `ws://localhost:8000/ws/session`.
+Backend will start at: `https://rime-interruption-recovery-1-tiw6.onrender.com` with WebSocket endpoint at `ws://localhost:8000/ws/session`.
 
 ---
 
@@ -68,7 +68,7 @@ npm install
 npm run dev
 ```
 
-Open browser at: `http://localhost:5173`
+Open browser at: `https://rime-interruption-recovery-s5f7.onrender.com/`
 
 ---
 
