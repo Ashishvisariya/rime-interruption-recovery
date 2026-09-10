@@ -11,6 +11,16 @@
  * DataForge 2026 Rime Hackathon - Phase 14
  */
 
+import { getRootBaseUrl } from './api.js';
+
+export const getWsBaseUrl = () => {
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_WS_BASE_URL) {
+    return import.meta.env.VITE_WS_BASE_URL.replace(/\/+$/, '');
+  }
+  const root = getRootBaseUrl();
+  return root.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+};
+
 export const WebSocketState = {
   DISCONNECTED: 'DISCONNECTED',
   CONNECTING: 'CONNECTING',
@@ -37,7 +47,7 @@ export const ServerEventType = {
 
 export class VoiceWebSocketClient {
   constructor(baseUrl = null) {
-    this.baseUrl = baseUrl || (typeof window !== 'undefined' ? (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + (window.location.hostname || '127.0.0.1') + ':8000' : 'ws://127.0.0.1:8000');
+    this.baseUrl = baseUrl || getWsBaseUrl();
     this.ws = null;
     this.sessionId = null;
     this.state = WebSocketState.DISCONNECTED;
