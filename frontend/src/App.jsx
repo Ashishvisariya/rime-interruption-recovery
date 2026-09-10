@@ -922,6 +922,9 @@ export default function App() {
     const promptToSend = typeof customPrompt === 'string' ? customPrompt : ttsText;
     if (!sessionId || !promptToSend.trim()) return;
 
+    // Clear input box immediately after sending
+    setTtsText('');
+
     defaultPlaybackManager.primePlayback();
     setIsLoading(true);
     setIsProcessing(true);
